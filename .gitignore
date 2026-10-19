@@ -8,3 +8,9 @@ __pycache__/
 node_modules/
 dist/
 build/
+
+# Local OCR test images and generated outputs
+backend/samples/
+
+# Local frontend backup
+frontend/app/page-backup.txt

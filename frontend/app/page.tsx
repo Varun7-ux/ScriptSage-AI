@@ -32,6 +32,7 @@ export default function Home() {
 
   const [editedText, setEditedText] = useState("");
   const [copied, setCopied] = useState(false);
+  const [zoom, setZoom] = useState(100);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -106,6 +107,7 @@ export default function Home() {
     setUploadError("");
     setEditedText("");
     setCopied(false);
+    setZoom(100);
     setFile(null);
 
     if (
@@ -214,7 +216,7 @@ export default function Home() {
     link.click();
     document.body.removeChild(link);
 
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function resetTranscription() {
@@ -236,6 +238,7 @@ export default function Home() {
     setUploadError("");
     setEditedText("");
     setCopied(false);
+    setZoom(100);
 
     const input = document.getElementById(
       "manuscript-image"
@@ -246,9 +249,15 @@ export default function Home() {
     }
   }
 
+  function changeZoom(amount: number) {
+    setZoom((current) =>
+      Math.max(50, Math.min(300, current + amount))
+    );
+  }
+
   return (
-    <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100 sm:px-10">
-      <div className="mx-auto max-w-6xl">
+    <main className="min-h-screen bg-slate-950 px-5 py-10 text-slate-100 sm:px-10">
+      <div className="mx-auto max-w-7xl">
 
         <header className="flex flex-col gap-5 border-b border-slate-800 pb-8 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -285,170 +294,189 @@ export default function Home() {
           </div>
         </header>
 
-        <section className="mt-10 grid gap-6 lg:grid-cols-2">
+        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
+          <h2 className="text-xl font-semibold">
+            Upload Manuscript
+          </h2>
 
-          {/* UPLOAD PANEL */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6 sm:p-7">
+          <p className="mt-2 text-sm text-slate-400">
+            Select a manuscript image to begin OCR transcription.
+          </p>
+
+          <div className="mt-5 flex flex-wrap items-center gap-4">
+            <label
+              htmlFor="manuscript-image"
+              className="cursor-pointer rounded-lg border border-slate-600 px-5 py-3 text-sm font-semibold hover:border-emerald-400"
+            >
+              Choose Manuscript Image
+            </label>
+
+            <input
+              id="manuscript-image"
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={handleFileChange}
+              disabled={uploading}
+              className="sr-only"
+            />
+
+            <button
+              type="button"
+              onClick={uploadImage}
+              disabled={
+                !file ||
+                uploading ||
+                backendStatus !== "connected"
+              }
+              className="rounded-lg bg-emerald-500 px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {uploading
+                ? "Processing Manuscript..."
+                : "Extract Devanagari Text"}
+            </button>
+
+            {file && (
+              <button
+                type="button"
+                onClick={removeImage}
+                disabled={uploading}
+                className="rounded-lg border border-slate-700 px-4 py-3 text-sm hover:border-rose-400 disabled:opacity-50"
+              >
+                Remove Image
+              </button>
+            )}
+          </div>
+
+          {file && (
+            <p className="mt-4 break-all text-sm text-slate-300">
+              Selected: {file.name} · {imageSize} ·{" "}
+              {(file.size / (1024 * 1024)).toFixed(2)} MB
+            </p>
+          )}
+
+          {uploading && (
+            <p role="status" className="mt-3 text-sm text-amber-300">
+              AI is analyzing the manuscript. Please wait...
+            </p>
+          )}
+
+          {uploadError && (
+            <p role="alert" className="mt-4 rounded-lg border border-rose-900 bg-rose-950/40 p-3 text-sm text-rose-300">
+              {uploadError}
+            </p>
+          )}
+        </section>
+
+        <section className="mt-6 grid gap-6 lg:grid-cols-2">
+
+          {/* LEFT: MANUSCRIPT VIEWER */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
             <p className="text-sm font-semibold text-emerald-400">
-              WORKSPACE
+              MANUSCRIPT VIEWER
             </p>
 
             <h2 className="mt-3 text-2xl font-semibold">
-              Manuscript Transcription
+              Original Manuscript
             </h2>
 
-            <p className="mt-3 leading-7 text-slate-400">
-              Upload a manuscript image to extract Devanagari
-              text using PaddleOCR.
+            <p className="mt-3 text-sm leading-6 text-slate-400">
+              Zoom in to inspect individual characters while
+              reviewing the transcription.
             </p>
 
-            <div className="mt-6 rounded-xl border border-dashed border-slate-700 bg-slate-950 p-5">
-              <label
-                htmlFor="manuscript-image"
-                className="block cursor-pointer rounded-lg border border-slate-700 p-6 text-center transition hover:border-emerald-400"
-              >
-                <span className="block text-3xl" aria-hidden="true">
-                  ↑
-                </span>
+            {preview ? (
+              <div className="mt-5">
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => changeZoom(-25)}
+                    disabled={zoom <= 50}
+                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm disabled:opacity-40"
+                  >
+                    − Zoom
+                  </button>
 
-                <span className="mt-3 block font-semibold">
-                  Choose Manuscript Image
-                </span>
+                  <span className="text-sm text-slate-300">
+                    {zoom}%
+                  </span>
 
-                <span className="mt-2 block text-sm text-slate-400">
-                  PNG, JPG or WebP · Maximum 10 MB
-                </span>
-              </label>
+                  <button
+                    type="button"
+                    onClick={() => changeZoom(25)}
+                    disabled={zoom >= 300}
+                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm disabled:opacity-40"
+                  >
+                    + Zoom
+                  </button>
 
-              <input
-                id="manuscript-image"
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                onChange={handleFileChange}
-                disabled={uploading}
-                className="sr-only"
-              />
+                  <button
+                    type="button"
+                    onClick={() => setZoom(100)}
+                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm"
+                  >
+                    Reset Zoom
+                  </button>
+                </div>
 
-              {preview && file && (
-                <div className="mt-5">
-                  <div className="overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
+                <div className="mt-4 h-[520px] overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-3">
+                  <div
+                    className="flex min-h-full items-start justify-center"
+                    style={{
+                      minWidth: `${zoom}%`,
+                    }}
+                  >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={preview}
-                      alt="Manuscript preview"
-                      className="max-h-80 w-full object-contain"
+                      alt="Original manuscript"
+                      className="block h-auto max-w-none"
+                      style={{
+                        width: `${zoom}%`,
+                      }}
                     />
                   </div>
-
-                  <p className="mt-3 break-all text-sm font-medium">
-                    {file.name}
-                  </p>
-
-                  <p className="mt-1 text-sm text-slate-400">
-                    {imageSize} ·{" "}
-                    {(file.size / (1024 * 1024)).toFixed(2)} MB
-                  </p>
-
-                  <button
-                    type="button"
-                    onClick={removeImage}
-                    disabled={uploading}
-                    className="mt-4 rounded-lg border border-slate-700 px-4 py-2 text-sm hover:border-rose-400 disabled:opacity-50"
-                  >
-                    Remove Image
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={uploadImage}
-                    disabled={
-                      uploading ||
-                      backendStatus !== "connected"
-                    }
-                    className="mt-4 w-full rounded-lg bg-emerald-500 px-5 py-3 font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {uploading
-                      ? "Processing Manuscript..."
-                      : "Extract Devanagari Text"}
-                  </button>
-
-                  {uploading && (
-                    <p
-                      role="status"
-                      className="mt-3 text-center text-sm text-amber-300"
-                    >
-                      AI is analyzing the manuscript.
-                      Please wait...
-                    </p>
-                  )}
-
-                  {backendStatus !== "connected" && (
-                    <p className="mt-3 text-sm text-amber-300">
-                      Waiting for backend connection.
-                    </p>
-                  )}
                 </div>
-              )}
 
-              {uploadResult && (
-                <div className="mt-5 rounded-lg border border-emerald-800 bg-emerald-950/40 p-4">
-                  <p className="font-semibold text-emerald-400">
-                    Manuscript Processed!
-                  </p>
-
-                  <p className="mt-2 break-all text-sm">
-                    {uploadResult.filename}
-                  </p>
-
-                  <p className="mt-2 text-sm text-slate-300">
-                    Dimensions: {uploadResult.width} ×{" "}
-                    {uploadResult.height} pixels
-                  </p>
-
-                  <p className="mt-1 text-sm text-slate-300">
-                    File Size:{" "}
-                    {(
-                      uploadResult.size_bytes /
-                      (1024 * 1024)
-                    ).toFixed(2)}{" "}
-                    MB
-                  </p>
-
-                  <p className="mt-3 text-sm text-emerald-400">
-                    OCR Status: {uploadResult.ocr_status}
-                  </p>
-
-                  <p className="mt-1 text-sm text-slate-300">
-                    Lines Detected: {uploadResult.lines_detected}
-                  </p>
-                </div>
-              )}
-
-              {uploadError && (
-                <p
-                  role="alert"
-                  className="mt-4 rounded-lg border border-rose-900 bg-rose-950/40 p-3 text-sm text-rose-300"
-                >
-                  {uploadError}
+                <p className="mt-3 text-xs text-slate-400">
+                  Scroll inside the viewer to inspect the image.
+                  Zoom range: 50%–300%.
                 </p>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div className="mt-5 flex h-[520px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950 p-6 text-center">
+                <span className="text-4xl" aria-hidden="true">
+                  📜
+                </span>
 
-            <div className="mt-5 rounded-xl border border-slate-800 p-4">
-              <p className="font-medium">
-                OCR Processing
-              </p>
+                <p className="mt-4 font-medium">
+                  No manuscript selected
+                </p>
 
-              <p className="mt-2 text-sm leading-6 text-slate-400">
-                PaddleOCR recognizes Devanagari text from
-                uploaded images. Historical handwriting may
-                require manual correction.
-              </p>
-            </div>
+                <p className="mt-2 text-sm text-slate-400">
+                  Upload an image to view it here.
+                </p>
+              </div>
+            )}
+
+            {uploadResult && (
+              <div className="mt-4 rounded-lg border border-emerald-900 bg-emerald-950/30 p-4">
+                <p className="font-semibold text-emerald-400">
+                  Manuscript Processed!
+                </p>
+
+                <p className="mt-2 text-sm text-slate-300">
+                  OCR Status: {uploadResult.ocr_status}
+                </p>
+
+                <p className="mt-1 text-sm text-slate-300">
+                  Grouped Lines: {uploadResult.lines_detected}
+                </p>
+              </div>
+            )}
           </div>
 
-          {/* EDITABLE TRANSCRIPTION PANEL */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6 sm:p-7">
+          {/* RIGHT: TRANSCRIPTION EDITOR */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
             <p className="text-sm font-semibold text-emerald-400">
               AI TRANSCRIPTION
             </p>
@@ -457,15 +485,15 @@ export default function Home() {
               Editable Devanagari Text
             </h2>
 
-            <p className="mt-3 leading-7 text-slate-400">
-              Review and manually correct the OCR transcription,
-              then copy or download the corrected text.
+            <p className="mt-3 text-sm leading-6 text-slate-400">
+              Compare the text with the manuscript, correct
+              OCR mistakes, and download the final result.
             </p>
 
             {uploadResult ? (
-              <div className="mt-6">
+              <div className="mt-5">
                 <p className="text-sm text-emerald-400">
-                  {uploadResult.lines_detected} OCR lines detected
+                  {uploadResult.lines_detected} grouped lines
                 </p>
 
                 <label
@@ -484,8 +512,8 @@ export default function Home() {
                     setEditedText(event.target.value);
                     setCopied(false);
                   }}
-                  className="mt-3 min-h-80 w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-5 text-lg leading-9 text-slate-100 outline-none focus:border-emerald-400"
-                  placeholder="Your transcription will appear here..."
+                  className="mt-3 h-[520px] w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-5 text-lg leading-9 text-slate-100 outline-none focus:border-emerald-400"
+                  placeholder="Your OCR transcription will appear here..."
                 />
 
                 <div className="mt-4 flex flex-wrap gap-3">
@@ -510,57 +538,34 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={resetTranscription}
-                    className="rounded-lg border border-slate-600 px-4 py-3 text-sm font-semibold hover:border-amber-400"
+                    className="rounded-lg border border-slate-600 px-4 py-3 text-sm hover:border-amber-400"
                   >
                     Reset Text
                   </button>
                 </div>
 
                 <p className="mt-4 text-xs leading-6 text-amber-300">
-                  OCR results may contain errors. Correct the text
-                  before using it as a historical transcription.
-                  Edits are not saved automatically.
+                  OCR output is a draft. Verify all words against
+                  the original manuscript. Edits are not saved
+                  automatically.
                 </p>
               </div>
             ) : (
-              <div className="mt-6 flex min-h-64 flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950 p-6 text-center">
+              <div className="mt-5 flex h-[520px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950 p-6 text-center">
                 <span className="text-4xl" aria-hidden="true">
-                  📜
+                  ✍️
                 </span>
 
                 <p className="mt-4 font-medium">
-                  Your editable transcription will appear here
+                  Transcription will appear here
                 </p>
 
-                <p className="mt-2 text-sm leading-6 text-slate-400">
-                  Choose a manuscript image and click
-                  Extract Devanagari Text.
+                <p className="mt-2 text-sm text-slate-400">
+                  Extract text from an uploaded manuscript
+                  to start reviewing.
                 </p>
               </div>
             )}
-
-            <div className="mt-6 rounded-xl border border-slate-800 p-4">
-              <p className="font-medium">
-                Project Components
-              </p>
-
-              <div className="mt-4 space-y-3 text-sm text-emerald-400">
-                <p>✓ Next.js Frontend</p>
-                <p>✓ FastAPI Backend</p>
-                <p>✓ Manuscript Image Upload</p>
-                <p>✓ Devanagari OCR Integration</p>
-                <p>✓ Editable Transcription</p>
-                <p>✓ TXT Download</p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => window.location.reload()}
-              className="mt-6 rounded-lg border border-slate-700 px-5 py-3 text-sm font-semibold hover:border-emerald-400"
-            >
-              Refresh Connection Status
-            </button>
           </div>
         </section>
 

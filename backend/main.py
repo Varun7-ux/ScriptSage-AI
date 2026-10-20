@@ -8,10 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, UnidentifiedImageError
 from paddleocr import PaddleOCR
 
+from preprocess import preprocess_array
+
+
 app = FastAPI(
     title="ScriptSage AI API",
     description="Backend API for the ScriptSage AI manuscript project.",
-    version="0.3.0",
+    version="0.4.0",
 )
 
 app.add_middleware(
@@ -202,7 +205,10 @@ def health():
 
 
 @app.post("/upload")
-async def upload_manuscript(file: UploadFile = File(...)):
+async def upload_manuscript(
+    file: UploadFile = File(...),
+    enhance: bool = False,
+):
     allowed_types = {
         "image/jpeg",
         "image/png",
@@ -247,10 +253,17 @@ async def upload_manuscript(file: UploadFile = File(...)):
         )
 
     try:
+        # Optionally enhance the image before OCR.
+        ocr_image = (
+            preprocess_array(image_array)
+            if enhance
+            else image_array
+        )
+
         # Keep model initialization and prediction thread-safe.
         with ocr_lock:
             model = get_ocr_model()
-            results = model.predict(image_array)
+            results = model.predict(ocr_image)
 
         extracted_text, lines_detected = (
             arrange_text_in_reading_order(results)
@@ -273,4 +286,5 @@ async def upload_manuscript(file: UploadFile = File(...)):
         "ocr_status": "completed",
         "extracted_text": extracted_text,
         "lines_detected": lines_detected,
+        "enhancement_applied": enhance,
     }

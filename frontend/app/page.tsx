@@ -1,5 +1,4 @@
-﻿
-"use client";
+﻿"use client";
 
 import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
@@ -15,6 +14,7 @@ type UploadResponse = {
   ocr_status: string;
   extracted_text: string;
   lines_detected: number;
+  enhancement_applied: boolean;
 };
 
 export default function Home() {
@@ -33,6 +33,7 @@ export default function Home() {
   const [editedText, setEditedText] = useState("");
   const [copied, setCopied] = useState(false);
   const [zoom, setZoom] = useState(100);
+  const [enhance, setEnhance] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -146,7 +147,7 @@ export default function Home() {
       formData.append("file", file);
 
       const response = await fetch(
-        "http://127.0.0.1:8000/upload",
+        `http://127.0.0.1:8000/upload?enhance=${enhance}`,
         {
           method: "POST",
           body: formData,
@@ -347,6 +348,21 @@ export default function Home() {
             )}
           </div>
 
+          <label className="mt-5 flex cursor-pointer items-center gap-3 text-sm text-slate-200">
+            <input
+              type="checkbox"
+              checked={enhance}
+              onChange={(event) => setEnhance(event.target.checked)}
+              disabled={uploading}
+              className="h-4 w-4 accent-emerald-500"
+            />
+            Enhance image before OCR (contrast and noise reduction)
+          </label>
+          <p className="mt-2 text-xs text-slate-400">
+            Enhancement is experimental and may not improve every image.
+            Re-extract text to apply a changed setting.
+          </p>
+
           {file && (
             <p className="mt-4 break-all text-sm text-slate-300">
               Selected: {file.name} · {imageSize} ·{" "}
@@ -470,6 +486,10 @@ export default function Home() {
 
                 <p className="mt-1 text-sm text-slate-300">
                   Grouped Lines: {uploadResult.lines_detected}
+                </p>
+
+                <p className="mt-1 text-sm text-slate-300">
+                  OCR Mode: {uploadResult.enhancement_applied ? "Enhanced" : "Original"}
                 </p>
               </div>
             )}

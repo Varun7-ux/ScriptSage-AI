@@ -5,6 +5,28 @@ import type { ChangeEvent } from "react";
 
 type BackendStatus = "checking" | "connected" | "offline";
 
+type EvaluationRow = {
+  sample: string;
+  original_cer: number;
+  original_wer: number;
+  enhanced_cer: number;
+  enhanced_wer: number;
+};
+
+function MetricBar({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="text-slate-300">{label}</span>
+        <span className="font-semibold tabular-nums">{value.toFixed(2)}%</span>
+      </div>
+      <div className="h-3 overflow-hidden rounded-full bg-slate-800">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, Math.max(0, value))}%` }} />
+      </div>
+    </div>
+  );
+}
+
 type UploadResponse = {
   message: string;
   filename: string;
@@ -34,6 +56,8 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [enhance, setEnhance] = useState(false);
+  const [evaluationRows, setEvaluationRows] = useState<EvaluationRow[]>([]);
+  const [evaluationError, setEvaluationError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -90,6 +114,53 @@ export default function Home() {
 
     return () => URL.revokeObjectURL(url);
   }, [file]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadEvaluation() {
+      try {
+        const response = await fetch("/evaluation/batch_results.csv", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Evaluation CSV not found.");
+        const csv = (await response.text()).replace(/^\uFEFF/, "").trim();
+        const lines = csv.split(/\r?\n/).filter(Boolean);
+        const headers = lines[0]?.split(",").map((item) => item.trim());
+        const expected = ["sample", "original_cer", "original_wer", "enhanced_cer", "enhanced_wer"];
+        if (!headers || !expected.every((key) => headers.includes(key))) {
+          throw new Error("Evaluation CSV has unexpected columns.");
+        }
+        const rows = lines.slice(1).map((line) => {
+          const cells = line.split(",");
+          const get = (key: string) => cells[headers.indexOf(key)]?.trim() ?? "";
+          return {
+            sample: get("sample"),
+            original_cer: Number(get("original_cer")),
+            original_wer: Number(get("original_wer")),
+            enhanced_cer: Number(get("enhanced_cer")),
+            enhanced_wer: Number(get("enhanced_wer")),
+          };
+        });
+        if (!rows.length || rows.some((row) => !row.sample ||
+          [row.original_cer, row.original_wer, row.enhanced_cer, row.enhanced_wer]
+            .some((value) => !Number.isFinite(value) || value < 0))) {
+          throw new Error("Evaluation CSV contains no valid results.");
+        }
+        setEvaluationRows(rows);
+        setEvaluationError("");
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setEvaluationError(error instanceof Error ? error.message : "Could not load evaluation data.");
+        }
+      }
+    }
+    void loadEvaluation();
+    return () => controller.abort();
+  }, []);
+
+  const average = (key: keyof Omit<EvaluationRow, "sample">) =>
+    evaluationRows.reduce((sum, row) => sum + row[key], 0) / (evaluationRows.length || 1);
 
   const statusText = {
     checking: "Checking backend...",
@@ -587,6 +658,70 @@ export default function Home() {
               </div>
             )}
           </div>
+        </section>
+
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
+          <p className="text-sm font-semibold text-emerald-400">OCR EVALUATION</p>
+          <h2 className="mt-3 text-2xl font-semibold">Accuracy Comparison Dashboard</h2>
+          <p className="mt-2 text-sm text-slate-400">
+            Results from saved reference transcriptions. Lower error rates are better.
+          </p>
+          {evaluationError && (
+            <p role="status" className="mt-5 rounded-lg border border-amber-800 bg-amber-950/30 p-4 text-sm text-amber-200">
+              Dashboard data unavailable: {evaluationError} Copy the generated CSV to
+              frontend/public/evaluation/batch_results.csv and refresh the page.
+            </p>
+          )}
+          {evaluationRows.length > 0 && (
+            <div className="mt-6 space-y-6">
+              <p className="text-sm text-slate-300">
+                Evaluated samples: <strong className="text-emerald-400">{evaluationRows.length}</strong>
+              </p>
+              <div className="grid gap-5 lg:grid-cols-2">
+                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
+                  <h3 className="mb-5 font-semibold">Character Error Rate (CER)</h3>
+                  <div className="space-y-5">
+                    <MetricBar label="Original OCR" value={average("original_cer")} color="bg-blue-500" />
+                    <MetricBar label="Enhanced OCR" value={average("enhanced_cer")} color="bg-emerald-500" />
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
+                  <h3 className="mb-5 font-semibold">Word Error Rate (WER)</h3>
+                  <div className="space-y-5">
+                    <MetricBar label="Original OCR" value={average("original_wer")} color="bg-blue-500" />
+                    <MetricBar label="Enhanced OCR" value={average("enhanced_wer")} color="bg-emerald-500" />
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs leading-5 text-slate-400">
+                Values are arithmetic averages of per-sample error rates from the saved CSV,
+                not a live score for the currently uploaded image. Bars are capped at 100% visually;
+                error rates can exceed 100%.
+              </p>
+              <div className="overflow-x-auto rounded-xl border border-slate-700">
+                <table className="w-full min-w-[580px] text-left text-sm">
+                  <thead className="bg-slate-800 text-slate-200">
+                    <tr>
+                      <th className="p-3">Sample</th><th className="p-3">Original CER</th>
+                      <th className="p-3">Enhanced CER</th><th className="p-3">Original WER</th>
+                      <th className="p-3">Enhanced WER</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {evaluationRows.map((row) => (
+                      <tr key={row.sample} className="border-t border-slate-800">
+                        <td className="p-3">{row.sample}</td>
+                        <td className="p-3">{row.original_cer.toFixed(2)}%</td>
+                        <td className="p-3">{row.enhanced_cer.toFixed(2)}%</td>
+                        <td className="p-3">{row.original_wer.toFixed(2)}%</td>
+                        <td className="p-3">{row.enhanced_wer.toFixed(2)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </section>
 
         <footer className="mt-10 border-t border-slate-800 pt-5 text-sm text-slate-500">

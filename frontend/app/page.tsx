@@ -1,8 +1,8 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
-import { calculateAccuracy, type AccuracyResult } from "../lib/accuracy";
+import { calculateAccuracy, compareWords, type AccuracyResult } from "../lib/accuracy";
 
 type BackendStatus = "checking" | "connected" | "offline";
 
@@ -724,6 +724,50 @@ export default function Home() {
                 word errors use whitespace-separated tokens. Error rates may exceed 100%.
                 For measuring raw OCR performance, evaluate before manually correcting the OCR text.
               </p>
+              <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
+                <h3 className="text-lg font-semibold text-white">OCR Error Highlighting</h3>
+                <p className="mt-2 text-sm text-slate-400">
+                  Compare the evaluated OCR transcription with the verified reference.
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2 text-xs">
+                  <span className="rounded-md bg-slate-800 px-3 py-1 text-slate-200">Correct</span>
+                  <span className="rounded-md bg-red-900/50 px-3 py-1 text-red-300">Substitution</span>
+                  <span className="rounded-md bg-amber-900/50 px-3 py-1 text-amber-300">Insertion</span>
+                  <span className="rounded-md bg-blue-900/50 px-3 py-1 text-blue-300">Deletion</span>
+                </div>
+                <div className="mt-5 flex flex-wrap gap-2 rounded-lg border border-slate-800 bg-slate-900 p-4 leading-8" lang="hi">
+                  {compareWords(liveResult.reference, liveResult.prediction).map((difference, index) => {
+                    const styles = {
+                      correct: "bg-slate-800 text-slate-200",
+                      substitution: "border border-red-700 bg-red-900/50 text-red-300",
+                      insertion: "border border-amber-700 bg-amber-900/50 text-amber-300",
+                      deletion: "border border-blue-700 bg-blue-900/50 text-blue-300",
+                    };
+                    const label = difference.type === "deletion"
+                      ? `Missing: ${difference.reference}`
+                      : difference.predicted;
+                    const tooltip = difference.type === "substitution"
+                      ? `Expected: ${difference.reference}`
+                      : difference.type === "insertion"
+                        ? "Extra word in OCR"
+                        : difference.type === "deletion"
+                          ? "Word missing from OCR"
+                          : "Correct word";
+                    return (
+                      <span
+                        key={index}
+                        title={tooltip}
+                        className={`rounded-md px-2 py-1 text-sm ${styles[difference.type]}`}
+                      >
+                        {label}
+                      </span>
+                    );
+                  })}
+                </div>
+                <p className="mt-3 text-xs text-slate-400">
+                  Hover over a highlighted word for details. Results reflect the last calculation.
+                </p>
+              </div>
             </div>
           )}
         </section>

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
+import { calculateAccuracy, type AccuracyResult } from "../lib/accuracy";
 
 type BackendStatus = "checking" | "connected" | "offline";
 
@@ -53,6 +54,8 @@ export default function Home() {
   const [uploadError, setUploadError] = useState("");
 
   const [editedText, setEditedText] = useState("");
+  const [referenceText, setReferenceText] = useState("");
+  const [liveResult, setLiveResult] = useState<(AccuracyResult & { reference: string; prediction: string }) | null>(null);
   const [copied, setCopied] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [enhance, setEnhance] = useState(false);
@@ -178,6 +181,7 @@ export default function Home() {
     setUploadResult(null);
     setUploadError("");
     setEditedText("");
+    setLiveResult(null);
     setCopied(false);
     setZoom(100);
     setFile(null);
@@ -208,6 +212,7 @@ export default function Home() {
     }
 
     setUploading(true);
+    setLiveResult(null);
     setUploadResult(null);
     setUploadError("");
     setEditedText("");
@@ -305,6 +310,7 @@ export default function Home() {
   }
 
   function removeImage() {
+    setLiveResult(null);
     setFile(null);
     setUploadResult(null);
     setUploadError("");
@@ -658,6 +664,68 @@ export default function Home() {
               </div>
             )}
           </div>
+        </section>
+
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
+          <p className="text-sm font-semibold text-emerald-400">LIVE OCR EVALUATION</p>
+          <h2 className="mt-3 text-2xl font-semibold">Calculate OCR Error Rates</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-400">
+            Paste a verified reference transcription to compare against the current editable OCR text.
+            Lower CER and WER are better. This is a separate evaluation from the saved dashboard below.
+          </p>
+          <label htmlFor="reference-transcription" className="mt-5 block text-sm font-medium text-slate-200">
+            Verified reference transcription
+          </label>
+          <textarea
+            id="reference-transcription"
+            lang="hi"
+            spellCheck={false}
+            value={referenceText}
+            onChange={(event) => setReferenceText(event.target.value)}
+            placeholder="Paste the correct Devanagari transcription here..."
+            className="mt-2 h-40 w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-4 text-base leading-7 text-slate-100 outline-none focus:border-emerald-400"
+          />
+          <div className="mt-4 flex flex-wrap items-center gap-4">
+            <button
+              type="button"
+              disabled={!referenceText.trim() || !editedText.trim() || !uploadResult}
+              onClick={() => setLiveResult({
+                ...calculateAccuracy(referenceText, editedText),
+                reference: referenceText,
+                prediction: editedText,
+              })}
+              className="rounded-lg bg-emerald-500 px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Calculate Accuracy
+            </button>
+            {!uploadResult && <p className="text-sm text-amber-300">Extract a manuscript first to enable evaluation.</p>}
+          </div>
+          {liveResult && (
+            <div className="mt-6 space-y-4" aria-live="polite">
+              {(liveResult.reference !== referenceText || liveResult.prediction !== editedText) && (
+                <p className="rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">
+                  Text has changed since this calculation. Click Calculate Accuracy to update the results.
+                </p>
+              )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
+                  <p className="text-sm text-slate-400">Character Error Rate (CER)</p>
+                  <p className="mt-2 text-3xl font-bold tabular-nums text-emerald-400">{liveResult.cer.toFixed(2)}%</p>
+                  <p className="mt-2 text-xs text-slate-400">{liveResult.characterErrors} edits / {liveResult.referenceCharacters} reference characters</p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
+                  <p className="text-sm text-slate-400">Word Error Rate (WER)</p>
+                  <p className="mt-2 text-3xl font-bold tabular-nums text-blue-400">{liveResult.wer.toFixed(2)}%</p>
+                  <p className="mt-2 text-xs text-slate-400">{liveResult.wordErrors} edits / {liveResult.referenceWords} reference words</p>
+                </div>
+              </div>
+              <p className="text-xs leading-5 text-slate-400">
+                Whitespace is normalized before comparison. Character errors use Unicode code points;
+                word errors use whitespace-separated tokens. Error rates may exceed 100%.
+                For measuring raw OCR performance, evaluate before manually correcting the OCR text.
+              </p>
+            </div>
+          )}
         </section>
 
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">

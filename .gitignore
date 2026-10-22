@@ -17,3 +17,10 @@ frontend/app/page-backup.txt
 backend/main-backup.py
 backend/evaluate_ocr-backup.py
 backend/evaluation/batch_results.csv
+# Temporary backups and translation patch files
+backend/main-before-*.py
+frontend/app/page-before-*.txt
+*-Patch*.zip
+translation-*.zip
+translation-*/
+local-translation-patch/

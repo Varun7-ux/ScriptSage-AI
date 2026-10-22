@@ -11,8 +11,8 @@ from paddleocr import PaddleOCR
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from local_translation import translate_hindi_to_english
-from preprocess import preprocess_array
+from backend.local_translation import translate_hindi_to_english
+from backend.preprocess import preprocess_array
 
 
 app = FastAPI(
@@ -58,7 +58,6 @@ def arrange_text_in_reading_order(results):
     1. Top to bottom
     2. Left to right within each line
     """
-
     text_regions = []
 
     for result in results:
@@ -301,7 +300,9 @@ async def translate_text(request: TranslationRequest):
         )
 
         if not translated:
-            raise RuntimeError("Local translation returned empty text.")
+            raise RuntimeError(
+                "Local translation returned empty text."
+            )
 
         return {
             "translated_text": translated,

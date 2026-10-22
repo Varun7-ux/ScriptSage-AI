@@ -1,915 +1,1100 @@
+
 "use client";
 
-import { useEffect, useState } from "react";
-import type { ChangeEvent } from "react";
-import { calculateAccuracy, compareWords, type AccuracyResult } from "../lib/accuracy";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-type BackendStatus = "checking" | "connected" | "offline";
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
-type EvaluationRow = {
-  sample: string;
-  original_cer: number;
-  original_wer: number;
-  enhanced_cer: number;
-  enhanced_wer: number;
+type OCRResult = {
+  filename?: string;
+  extracted_text?: string;
+  lines_detected?: number;
+  width?: number;
+  height?: number;
+  size_bytes?: number;
+  enhancement_applied?: boolean;
+  message?: string;
 };
 
-function MetricBar({ label, value, color }: { label: string; value: number; color: string }) {
+type EvaluationRow = Record<string, string>;
+
+function getWordAccuracy(reference: string, predicted: string) {
+  const expected = reference.trim().split(/\s+/).filter(Boolean);
+  const actual = predicted.trim().split(/\s+/).filter(Boolean);
+
+  if (!expected.length) {
+    return { accuracy: 0, correct: 0, total: actual.length };
+  }
+
+  const previous = Array.from(
+    { length: actual.length + 1 },
+    (_, index) => index
+  );
+
+  for (let i = 1; i <= expected.length; i++) {
+    const current = [i];
+
+    for (let j = 1; j <= actual.length; j++) {
+      current[j] =
+        expected[i - 1] === actual[j - 1]
+          ? previous[j - 1]
+          : Math.min(previous[j - 1], previous[j], current[j - 1]) + 1;
+    }
+
+    previous.splice(0, previous.length, ...current);
+  }
+
+  const edits = previous[actual.length];
+  const correct = Math.max(0, expected.length - edits);
+
+  return {
+    accuracy: Math.max(
+      0,
+      Math.min(100, (1 - edits / expected.length) * 100)
+    ),
+    correct,
+    total: expected.length,
+  };
+}
+
+function MetricCard({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3 text-sm">
-        <span className="text-slate-300">{label}</span>
-        <span className="font-semibold tabular-nums">{value.toFixed(2)}%</span>
-      </div>
-      <div className="h-3 overflow-hidden rounded-full bg-slate-800">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, Math.max(0, value))}%` }} />
-      </div>
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <p className="text-sm font-medium text-slate-500">{label}</p>
+      <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
+        {value}
+      </p>
+      <p className="mt-1 text-xs text-slate-500">{detail}</p>
     </div>
   );
 }
 
-type UploadResponse = {
-  message: string;
-  filename: string;
-  width: number;
-  height: number;
-  size_bytes: number;
-  ocr_status: string;
-  extracted_text: string;
-  lines_detected: number;
-  enhancement_applied: boolean;
-};
-
 export default function Home() {
-  const [backendStatus, setBackendStatus] =
-    useState<BackendStatus>("checking");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageUrlRef = useRef<string | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
-  const [imageSize, setImageSize] = useState("");
-
-  const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] =
-    useState<UploadResponse | null>(null);
-  const [uploadError, setUploadError] = useState("");
-
-  const [editedText, setEditedText] = useState("");
-  const [translatedText, setTranslatedText] = useState("");
-  const [translationSource, setTranslationSource] = useState("");
-  const [translating, setTranslating] = useState(false);
-  const [translationError, setTranslationError] = useState("");
-  const [referenceText, setReferenceText] = useState("");
-  const [liveResult, setLiveResult] = useState<(AccuracyResult & { reference: string; prediction: string }) | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [imageUrl, setImageUrl] = useState("");
+  const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [zoom, setZoom] = useState(100);
-  const [enhance, setEnhance] = useState(false);
+  const [enhance, setEnhance] = useState(true);
+
+  const [backendOnline, setBackendOnline] = useState(false);
+  const [checkingBackend, setCheckingBackend] = useState(true);
+  const [loadingOCR, setLoadingOCR] = useState(false);
+  const [loadingTranslation, setLoadingTranslation] = useState(false);
+
+  const [transcription, setTranscription] = useState("");
+  const [translatedText, setTranslatedText] = useState("");
+  const [ocrResult, setOcrResult] = useState<OCRResult | null>(null);
+
+  const [referenceText, setReferenceText] = useState("");
+  const [copied, setCopied] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
   const [evaluationRows, setEvaluationRows] = useState<EvaluationRow[]>([]);
+  const [evaluationLoading, setEvaluationLoading] = useState(true);
   const [evaluationError, setEvaluationError] = useState("");
 
-  useEffect(() => {
-    const controller = new AbortController();
-
-    async function checkBackend() {
-      try {
-        const response = await fetch(
-          "http://127.0.0.1:8000/health",
-          {
-            signal: controller.signal,
-            cache: "no-store",
-          }
-        );
-
-        if (!response.ok) {
-          throw new Error("Backend unavailable");
-        }
-
-        const data: { status: string } = await response.json();
-
-        setBackendStatus(
-          data.status === "healthy" ? "connected" : "offline"
-        );
-      } catch {
-        if (!controller.signal.aborted) {
-          setBackendStatus("offline");
-        }
-      }
+  const checkBackend = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/health`, {
+        cache: "no-store",
+      });
+      setBackendOnline(response.ok);
+    } catch {
+      setBackendOnline(false);
+    } finally {
+      setCheckingBackend(false);
     }
-
-    void checkBackend();
-
-    return () => controller.abort();
   }, []);
 
   useEffect(() => {
-    if (!file) {
-      setPreview(null);
-      setImageSize("");
-      return;
-    }
-
-    const url = URL.createObjectURL(file);
-    const image = new Image();
-
-    image.onload = () => {
-      setImageSize(
-        `${image.naturalWidth} × ${image.naturalHeight} pixels`
-      );
-    };
-
-    image.src = url;
-    setPreview(url);
-
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
+    void checkBackend();
+    const interval = window.setInterval(() => void checkBackend(), 15000);
+    return () => window.clearInterval(interval);
+  }, [checkBackend]);
 
   useEffect(() => {
-    const controller = new AbortController();
+    return () => {
+      if (imageUrlRef.current) {
+        URL.revokeObjectURL(imageUrlRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
     async function loadEvaluation() {
+      setEvaluationLoading(true);
+      setEvaluationError("");
+
       try {
         const response = await fetch("/evaluation/batch_results.csv", {
           cache: "no-store",
-          signal: controller.signal,
         });
-        if (!response.ok) throw new Error("Evaluation CSV not found.");
-        const csv = (await response.text()).replace(/^\uFEFF/, "").trim();
-        const lines = csv.split(/\r?\n/).filter(Boolean);
-        const headers = lines[0]?.split(",").map((item) => item.trim());
-        const expected = ["sample", "original_cer", "original_wer", "enhanced_cer", "enhanced_wer"];
-        if (!headers || !expected.every((key) => headers.includes(key))) {
-          throw new Error("Evaluation CSV has unexpected columns.");
+
+        if (!response.ok) {
+          throw new Error("Evaluation CSV is not available yet.");
         }
-        const rows = lines.slice(1).map((line) => {
-          const cells = line.split(",");
-          const get = (key: string) => cells[headers.indexOf(key)]?.trim() ?? "";
-          return {
-            sample: get("sample"),
-            original_cer: Number(get("original_cer")),
-            original_wer: Number(get("original_wer")),
-            enhanced_cer: Number(get("enhanced_cer")),
-            enhanced_wer: Number(get("enhanced_wer")),
-          };
+
+        const csv = await response.text();
+        const lines = csv.trim().split(/\r?\n/);
+
+        if (lines.length < 2) {
+          if (!cancelled) setEvaluationRows([]);
+          return;
+        }
+
+        const parseCSVLine = (line: string) => {
+          const cells: string[] = [];
+          let cell = "";
+          let quoted = false;
+
+          for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+
+            if (char === '"' && quoted && line[i + 1] === '"') {
+              cell += '"';
+              i++;
+            } else if (char === '"') {
+              quoted = !quoted;
+            } else if (char === "," && !quoted) {
+              cells.push(cell);
+              cell = "";
+            } else {
+              cell += char;
+            }
+          }
+
+          cells.push(cell);
+          return cells;
+        };
+
+        const headers = parseCSVLine(lines[0]).map((item) =>
+          item.trim().replace(/^\uFEFF/, "")
+        );
+
+        const rows = lines.slice(1).filter(Boolean).map((line) => {
+          const values = parseCSVLine(line);
+          return Object.fromEntries(
+            headers.map((header, index) => [
+              header,
+              (values[index] ?? "").trim(),
+            ])
+          );
         });
-        if (!rows.length || rows.some((row) => !row.sample ||
-          [row.original_cer, row.original_wer, row.enhanced_cer, row.enhanced_wer]
-            .some((value) => !Number.isFinite(value) || value < 0))) {
-          throw new Error("Evaluation CSV contains no valid results.");
+
+        if (!cancelled) setEvaluationRows(rows);
+      } catch (err) {
+        if (!cancelled) {
+          setEvaluationError(
+            err instanceof Error ? err.message : "Could not load evaluation."
+          );
+          setEvaluationRows([]);
         }
-        setEvaluationRows(rows);
-        setEvaluationError("");
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          setEvaluationError(error instanceof Error ? error.message : "Could not load evaluation data.");
-        }
+      } finally {
+        if (!cancelled) setEvaluationLoading(false);
       }
     }
+
     void loadEvaluation();
-    return () => controller.abort();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const average = (key: keyof Omit<EvaluationRow, "sample">) =>
-    evaluationRows.reduce((sum, row) => sum + row[key], 0) / (evaluationRows.length || 1);
+  const accuracy = referenceText.trim()
+    ? getWordAccuracy(referenceText, transcription)
+    : null;
 
-  const statusText = {
-    checking: "Checking backend...",
-    connected: "Backend connected",
-    offline: "Backend offline",
-  }[backendStatus];
-
-  function handleFileChange(
-    event: ChangeEvent<HTMLInputElement>
-  ) {
-    const selected = event.target.files?.[0];
-
+  const chooseFile = (selected: File | undefined) => {
     if (!selected) return;
 
-    setUploadResult(null);
-    setUploadError("");
-    setEditedText("");
-    setLiveResult(null);
+    setError("");
+    setNotice("");
+    setCopied("");
     setTranslatedText("");
-    setTranslationError("");
-    setCopied(false);
+    setTranscription("");
+    setOcrResult(null);
     setZoom(100);
-    setFile(null);
 
-    if (
-      !["image/png", "image/jpeg", "image/webp"].includes(
-        selected.type
-      )
-    ) {
-      setUploadError("Please choose a PNG, JPG, or WebP image.");
-      event.target.value = "";
+    if (!selected.type.startsWith("image/")) {
+      setError("Please choose an image file, such as JPG, PNG, or WEBP.");
       return;
     }
 
-    if (selected.size > 10 * 1024 * 1024) {
-      setUploadError("Image must be smaller than 10 MB.");
-      event.target.value = "";
+    if (selected.size > 15 * 1024 * 1024) {
+      setError("The image is larger than 15 MB. Please choose a smaller image.");
       return;
     }
 
+    if (imageUrlRef.current) {
+      URL.revokeObjectURL(imageUrlRef.current);
+    }
+
+    const nextUrl = URL.createObjectURL(selected);
+    imageUrlRef.current = nextUrl;
+
+    const image = new Image();
+
+    image.onload = () => {
+      setImageSize({
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+      });
+    };
+
+    image.src = nextUrl;
     setFile(selected);
-  }
+    setImageUrl(nextUrl);
+  };
 
-  async function uploadImage() {
+  const uploadAndOCR = async () => {
     if (!file) {
-      setUploadError("Please select an image first.");
+      setError("Choose a manuscript image before starting OCR.");
       return;
     }
 
-    setUploading(true);
-    setLiveResult(null);
+    setLoadingOCR(true);
+    setError("");
+    setNotice("");
+    setCopied("");
     setTranslatedText("");
-    setTranslationError("");
-    setUploadResult(null);
-    setUploadError("");
-    setEditedText("");
-    setCopied(false);
 
     try {
       const formData = new FormData();
       formData.append("file", file);
 
       const response = await fetch(
-        `http://127.0.0.1:8000/upload?enhance=${enhance}`,
+        `${API_BASE_URL}/upload?enhance=${enhance}`,
         {
           method: "POST",
           body: formData,
         }
       );
 
-      const data: UploadResponse | { detail?: string } =
-        await response.json();
+      const data = (await response.json()) as OCRResult & {
+        detail?: string;
+      };
 
       if (!response.ok) {
-        throw new Error(
-          "detail" in data
-            ? data.detail || "OCR processing failed."
-            : "OCR processing failed."
-        );
+        throw new Error(data.detail || data.message || "OCR processing failed.");
       }
 
-      const result = data as UploadResponse;
-
-      if (
-        typeof result.extracted_text !== "string" ||
-        typeof result.lines_detected !== "number"
-      ) {
-        throw new Error(
-          "Backend did not return OCR text. Check backend/main.py."
-        );
-      }
-
-      setUploadResult(result);
-      setEditedText(result.extracted_text);
-    } catch (error) {
-      setUploadError(
-        error instanceof Error
-          ? error.message
-          : "Unable to process manuscript."
+      setOcrResult(data);
+      setTranscription(data.extracted_text || "");
+      setNotice(
+        `OCR completed. ${data.lines_detected ?? 0} lines detected.`
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `${err.message} Check that the backend is running at ${API_BASE_URL}.`
+          : "Could not process this image."
       );
     } finally {
-      setUploading(false);
+      setLoadingOCR(false);
     }
-  }
+  };
 
-  async function translateToEnglish() {
-    const source = editedText.trim();
-    if (!source || translating) return;
-    setTranslating(true);
-    setTranslationError("");
-    setTranslatedText("");
+  const translateText = async () => {
+    if (!transcription.trim()) {
+      setError("Run OCR or enter some Hindi text before translating.");
+      return;
+    }
+
+    setLoadingTranslation(true);
+    setError("");
+    setNotice("");
+
     try {
-      const response = await fetch("http://127.0.0.1:8000/translate", {
+      const response = await fetch(`${API_BASE_URL}/translate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: source }),
+        body: JSON.stringify({ text: transcription }),
       });
-      const data: { translated_text?: string; detail?: string } = await response.json();
-      if (!response.ok || !data.translated_text) {
+
+      const data = (await response.json()) as {
+        translated_text?: string;
+        translation?: string;
+        translatedText?: string;
+        text?: string;
+        detail?: string;
+      };
+
+      if (!response.ok) {
         throw new Error(data.detail || "Translation failed.");
       }
-      setTranslatedText(data.translated_text);
-      setTranslationSource(source);
-    } catch (error) {
-      setTranslationError(error instanceof Error ? error.message : "Translation failed.");
+
+      const result =
+        data.translated_text ??
+        data.translation ??
+        data.translatedText ??
+        data.text ??
+        "";
+
+      if (typeof result !== "string" || !result.trim()) {
+        throw new Error("The server returned no translated text.");
+      }
+
+      setTranslatedText(result);
+      setNotice("English translation completed.");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `${err.message} Check the backend translation endpoint.`
+          : "Could not translate the text."
+      );
     } finally {
-      setTranslating(false);
+      setLoadingTranslation(false);
     }
-  }
+  };
 
-  function downloadTranslation() {
-    if (!translatedText) return;
-    const url = URL.createObjectURL(new Blob([translatedText], { type: "text/plain;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "ScriptSage_English_Translation.txt";
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  async function copyTranscription() {
-    if (!editedText) return;
+  const copyText = async (text: string, label: string) => {
+    if (!text.trim()) {
+      setError("There is no text to copy yet.");
+      return;
+    }
 
     try {
-      await navigator.clipboard.writeText(editedText);
-      setCopied(true);
+      await navigator.clipboard.writeText(text);
+      setCopied(label);
+      setNotice(`${label} copied to clipboard.`);
+      window.setTimeout(() => setCopied(""), 2000);
     } catch {
-      setUploadError("Could not copy the transcription.");
+      setError("Clipboard access failed. Select the text and copy it manually.");
     }
-  }
+  };
 
-  function downloadTranscription() {
-    if (!editedText) return;
+  const downloadText = (text: string, filename: string) => {
+    if (!text.trim()) {
+      setError("There is no text to download yet.");
+      return;
+    }
 
-    const blob = new Blob([editedText], {
+    const blob = new Blob([text], {
       type: "text/plain;charset=utf-8",
     });
-
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
 
     link.href = url;
-    link.download = "ScriptSage_Transcription.txt";
-
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
 
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  function resetTranscription() {
-    if (!uploadResult) return;
-
-    const confirmed = window.confirm(
-      "Reset all edits and restore the original OCR text?"
-    );
-
-    if (confirmed) {
-      setEditedText(uploadResult.extracted_text);
-      setCopied(false);
+  const resetProject = () => {
+    if (imageUrlRef.current) {
+      URL.revokeObjectURL(imageUrlRef.current);
+      imageUrlRef.current = null;
     }
-  }
 
-  function removeImage() {
-    setLiveResult(null);
-    setTranslatedText("");
-    setTranslationError("");
     setFile(null);
-    setUploadResult(null);
-    setUploadError("");
-    setEditedText("");
-    setCopied(false);
+    setImageUrl("");
+    setImageSize({ width: 0, height: 0 });
     setZoom(100);
+    setTranscription("");
+    setTranslatedText("");
+    setReferenceText("");
+    setOcrResult(null);
+    setError("");
+    setNotice("");
+    setCopied("");
 
-    const input = document.getElementById(
-      "manuscript-image"
-    ) as HTMLInputElement | null;
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
 
-    if (input) {
-      input.value = "";
-    }
-  }
+  const averageSavedAccuracy = (() => {
+    const accuracyKey = evaluationRows.length
+      ? Object.keys(evaluationRows[0]).find((key) =>
+          /accuracy|score|cer|wer/i.test(key)
+        )
+      : undefined;
 
-  function changeZoom(amount: number) {
-    setZoom((current) =>
-      Math.max(50, Math.min(300, current + amount))
+    if (!accuracyKey) return null;
+
+    const values = evaluationRows
+      .map((row) => Number.parseFloat(row[accuracyKey]))
+      .filter(Number.isFinite);
+
+    if (!values.length) return null;
+
+    const normalized = values.map((value) =>
+      /cer|wer/i.test(accuracyKey) && value <= 1 ? (1 - value) * 100 : value
     );
-  }
+
+    const average =
+      normalized.reduce((sum, value) => sum + value, 0) / normalized.length;
+
+    return {
+      key: accuracyKey,
+      value: average,
+    };
+  })();
 
   return (
-    <main className="min-h-screen bg-slate-950 px-5 py-10 text-slate-100 sm:px-10">
-      <div className="mx-auto max-w-7xl">
+    <main className="min-h-screen bg-[#f6f8fc] text-slate-900">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-5 py-4 sm:px-8">
+          <a href="#" className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-700 text-lg font-black text-white shadow-sm">
+              S
+            </div>
+            <div>
+              <p className="text-lg font-extrabold tracking-tight">
+                ScriptSage <span className="text-emerald-700">AI</span>
+              </p>
+              <p className="text-xs text-slate-500">
+                Preserving manuscripts, connecting languages
+              </p>
+            </div>
+          </a>
 
-        <header className="flex flex-col gap-5 border-b border-slate-800 pb-8 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  backendOnline ? "bg-emerald-500" : "bg-red-500"
+                }`}
+              />
+              {checkingBackend
+                ? "Checking backend..."
+                : backendOnline
+                  ? "Backend connected"
+                  : "Backend offline"}
+            </div>
+            <button
+              onClick={() => void checkBackend()}
+              className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <section className="relative overflow-hidden bg-slate-950">
+        <div className="pointer-events-none absolute inset-0 opacity-20">
+          <div className="absolute -right-20 -top-40 h-96 w-96 rounded-full bg-emerald-400 blur-3xl" />
+          <div className="absolute -bottom-48 left-1/4 h-96 w-96 rounded-full bg-teal-500 blur-3xl" />
+        </div>
+
+        <div className="relative mx-auto grid max-w-7xl gap-10 px-5 py-14 sm:px-8 sm:py-20 lg:grid-cols-[1.3fr_0.7fr] lg:items-center">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-widest text-emerald-400">
-              Digital Heritage · AI Research
-            </p>
+            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-4 py-2 text-xs font-semibold tracking-wide text-emerald-200">
+              <span className="h-2 w-2 rounded-full bg-emerald-400" />
+              AI-POWERED MANUSCRIPT WORKSPACE
+            </div>
 
-            <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">
-              ScriptSage <span className="text-emerald-400">AI</span>
+            <h1 className="max-w-3xl text-4xl font-black leading-tight tracking-tight text-white sm:text-5xl lg:text-6xl">
+              Ancient words.
+              <span className="block text-emerald-400">
+                New understanding.
+              </span>
             </h1>
 
-            <p className="mt-3 max-w-xl text-slate-400">
-              Preserve historical Devanagari manuscripts
-              through AI-powered digital transcription.
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-900 px-5 py-4">
-            <p className="text-xs uppercase tracking-wider text-slate-400">
-              System Status
+            <p className="mt-6 max-w-2xl text-base leading-7 text-slate-300 sm:text-lg">
+              Transform Hindi Devanagari manuscript images into editable text
+              and English translations with an integrated OCR workflow.
             </p>
 
-            <p
-              className={`mt-2 text-sm font-semibold ${
-                backendStatus === "connected"
-                  ? "text-emerald-400"
-                  : backendStatus === "offline"
-                    ? "text-rose-400"
-                    : "text-amber-300"
-              }`}
-            >
-              ● {statusText}
-            </p>
-          </div>
-        </header>
-
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
-          <h2 className="text-xl font-semibold">
-            Upload Manuscript
-          </h2>
-
-          <p className="mt-2 text-sm text-slate-400">
-            Select a manuscript image to begin OCR transcription.
-          </p>
-
-          <div className="mt-5 flex flex-wrap items-center gap-4">
-            <label
-              htmlFor="manuscript-image"
-              className="cursor-pointer rounded-lg border border-slate-600 px-5 py-3 text-sm font-semibold hover:border-emerald-400"
-            >
-              Choose Manuscript Image
-            </label>
-
-            <input
-              id="manuscript-image"
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              onChange={handleFileChange}
-              disabled={uploading}
-              className="sr-only"
-            />
-
-            <button
-              type="button"
-              onClick={uploadImage}
-              disabled={
-                !file ||
-                uploading ||
-                backendStatus !== "connected"
-              }
-              className="rounded-lg bg-emerald-500 px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {uploading
-                ? "Processing Manuscript..."
-                : "Extract Devanagari Text"}
-            </button>
-
-            {file && (
+            <div className="mt-8 flex flex-wrap gap-3">
               <button
-                type="button"
-                onClick={removeImage}
-                disabled={uploading}
-                className="rounded-lg border border-slate-700 px-4 py-3 text-sm hover:border-rose-400 disabled:opacity-50"
+                onClick={() =>
+                  document
+                    .getElementById("workspace")
+                    ?.scrollIntoView({ behavior: "smooth" })
+                }
+                className="rounded-xl bg-emerald-400 px-5 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/20 transition hover:bg-emerald-300"
               >
-                Remove Image
+                Open workspace <span aria-hidden="true">→</span>
               </button>
-            )}
-          </div>
-
-          <label className="mt-5 flex cursor-pointer items-center gap-3 text-sm text-slate-200">
-            <input
-              type="checkbox"
-              checked={enhance}
-              onChange={(event) => setEnhance(event.target.checked)}
-              disabled={uploading}
-              className="h-4 w-4 accent-emerald-500"
-            />
-            Enhance image before OCR (contrast and noise reduction)
-          </label>
-          <p className="mt-2 text-xs text-slate-400">
-            Enhancement is experimental and may not improve every image.
-            Re-extract text to apply a changed setting.
-          </p>
-
-          {file && (
-            <p className="mt-4 break-all text-sm text-slate-300">
-              Selected: {file.name} · {imageSize} ·{" "}
-              {(file.size / (1024 * 1024)).toFixed(2)} MB
-            </p>
-          )}
-
-          {uploading && (
-            <p role="status" className="mt-3 text-sm text-amber-300">
-              AI is analyzing the manuscript. Please wait...
-            </p>
-          )}
-
-          {uploadError && (
-            <p role="alert" className="mt-4 rounded-lg border border-rose-900 bg-rose-950/40 p-3 text-sm text-rose-300">
-              {uploadError}
-            </p>
-          )}
-        </section>
-
-        <section className="mt-6 grid gap-6 lg:grid-cols-2">
-
-          {/* LEFT: MANUSCRIPT VIEWER */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
-            <p className="text-sm font-semibold text-emerald-400">
-              MANUSCRIPT VIEWER
-            </p>
-
-            <h2 className="mt-3 text-2xl font-semibold">
-              Original Manuscript
-            </h2>
-
-            <p className="mt-3 text-sm leading-6 text-slate-400">
-              Zoom in to inspect individual characters while
-              reviewing the transcription.
-            </p>
-
-            {preview ? (
-              <div className="mt-5">
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => changeZoom(-25)}
-                    disabled={zoom <= 50}
-                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm disabled:opacity-40"
-                  >
-                    − Zoom
-                  </button>
-
-                  <span className="text-sm text-slate-300">
-                    {zoom}%
-                  </span>
-
-                  <button
-                    type="button"
-                    onClick={() => changeZoom(25)}
-                    disabled={zoom >= 300}
-                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm disabled:opacity-40"
-                  >
-                    + Zoom
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setZoom(100)}
-                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm"
-                  >
-                    Reset Zoom
-                  </button>
-                </div>
-
-                <div className="mt-4 h-[520px] overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-3">
-                  <div
-                    className="flex min-h-full items-start justify-center"
-                    style={{
-                      minWidth: `${zoom}%`,
-                    }}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={preview}
-                      alt="Original manuscript"
-                      className="block h-auto max-w-none"
-                      style={{
-                        width: `${zoom}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <p className="mt-3 text-xs text-slate-400">
-                  Scroll inside the viewer to inspect the image.
-                  Zoom range: 50%–300%.
-                </p>
-              </div>
-            ) : (
-              <div className="mt-5 flex h-[520px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950 p-6 text-center">
-                <span className="text-4xl" aria-hidden="true">
-                  📜
-                </span>
-
-                <p className="mt-4 font-medium">
-                  No manuscript selected
-                </p>
-
-                <p className="mt-2 text-sm text-slate-400">
-                  Upload an image to view it here.
-                </p>
-              </div>
-            )}
-
-            {uploadResult && (
-              <div className="mt-4 rounded-lg border border-emerald-900 bg-emerald-950/30 p-4">
-                <p className="font-semibold text-emerald-400">
-                  Manuscript Processed!
-                </p>
-
-                <p className="mt-2 text-sm text-slate-300">
-                  OCR Status: {uploadResult.ocr_status}
-                </p>
-
-                <p className="mt-1 text-sm text-slate-300">
-                  Grouped Lines: {uploadResult.lines_detected}
-                </p>
-
-                <p className="mt-1 text-sm text-slate-300">
-                  OCR Mode: {uploadResult.enhancement_applied ? "Enhanced" : "Original"}
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* RIGHT: TRANSCRIPTION EDITOR */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
-            <p className="text-sm font-semibold text-emerald-400">
-              AI TRANSCRIPTION
-            </p>
-
-            <h2 className="mt-3 text-2xl font-semibold">
-              Editable Devanagari Text
-            </h2>
-
-            <p className="mt-3 text-sm leading-6 text-slate-400">
-              Compare the text with the manuscript, correct
-              OCR mistakes, and download the final result.
-            </p>
-
-            {uploadResult ? (
-              <div className="mt-5">
-                <p className="text-sm text-emerald-400">
-                  {uploadResult.lines_detected} grouped lines
-                </p>
-
-                <label
-                  htmlFor="editable-transcription"
-                  className="mt-4 block text-sm font-medium text-slate-300"
-                >
-                  Edit transcription
-                </label>
-
-                <textarea
-                  id="editable-transcription"
-                  lang="hi"
-                  spellCheck={false}
-                  value={editedText}
-                  onChange={(event) => {
-                    setEditedText(event.target.value);
-                    setCopied(false);
-                  }}
-                  className="mt-3 h-[520px] w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-5 text-lg leading-9 text-slate-100 outline-none focus:border-emerald-400"
-                  placeholder="Your OCR transcription will appear here..."
-                />
-
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={copyTranscription}
-                    disabled={!editedText}
-                    className="rounded-lg bg-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
-                  >
-                    {copied ? "Copied!" : "Copy Text"}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={downloadTranscription}
-                    disabled={!editedText}
-                    className="rounded-lg bg-blue-500 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-400 disabled:opacity-50"
-                  >
-                    Download TXT
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={resetTranscription}
-                    className="rounded-lg border border-slate-600 px-4 py-3 text-sm hover:border-amber-400"
-                  >
-                    Reset Text
-                  </button>
-                </div>
-
-                <p className="mt-4 text-xs leading-6 text-amber-300">
-                  OCR output is a draft. Verify all words against
-                  the original manuscript. Edits are not saved
-                  automatically.
-                </p>
-              </div>
-            ) : (
-              <div className="mt-5 flex h-[520px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950 p-6 text-center">
-                <span className="text-4xl" aria-hidden="true">
-                  ✍️
-                </span>
-
-                <p className="mt-4 font-medium">
-                  Transcription will appear here
-                </p>
-
-                <p className="mt-2 text-sm text-slate-400">
-                  Extract text from an uploaded manuscript
-                  to start reviewing.
-                </p>
-              </div>
-            )}
-          </div>
-        </section>
-
-        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
-          <p className="text-sm font-semibold text-emerald-400">AI TRANSLATION</p>
-          <h2 className="mt-3 text-2xl font-semibold">Hindi to English Translation</h2>
-          <p className="mt-2 text-sm text-slate-400">Translate the current edited Devanagari transcription. Historical language and unclear OCR may need human review.</p>
-          <div className="mt-5 flex flex-wrap gap-3">
-            <button type="button" onClick={translateToEnglish} disabled={!uploadResult || !editedText.trim() || translating}
-              className="rounded-lg bg-emerald-500 px-5 py-3 text-sm font-semibold text-slate-950 disabled:opacity-50">
-              {translating ? "Translating..." : "Translate to English"}
-            </button>
-            <button type="button" disabled={!translatedText} onClick={() => void navigator.clipboard.writeText(translatedText)}
-              className="rounded-lg border border-slate-600 px-4 py-3 text-sm disabled:opacity-50">Copy English</button>
-            <button type="button" disabled={!translatedText} onClick={downloadTranslation}
-              className="rounded-lg border border-slate-600 px-4 py-3 text-sm disabled:opacity-50">Download English TXT</button>
-          </div>
-          {translationError && <p role="alert" className="mt-4 text-sm text-rose-300">{translationError}</p>}
-          {translatedText && (
-            <div className="mt-5">
-              {translationSource !== editedText.trim() && <p className="mb-3 text-sm text-amber-300">The transcription changed. Translate again to refresh the English text.</p>}
-              <label htmlFor="english-translation" className="mb-2 block text-sm text-slate-300">English translation</label>
-              <textarea id="english-translation" lang="en" readOnly value={translatedText}
-                className="h-56 w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-4 leading-7 text-slate-100" />
+              <a
+                href="#evaluation"
+                className="rounded-xl border border-white/20 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10"
+              >
+                View evaluation
+              </a>
             </div>
-          )}
-        </section>
+          </div>
 
-        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
-          <p className="text-sm font-semibold text-emerald-400">LIVE OCR EVALUATION</p>
-          <h2 className="mt-3 text-2xl font-semibold">Calculate OCR Error Rates</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-400">
-            Paste a verified reference transcription to compare against the current editable OCR text.
-            Lower CER and WER are better. This is a separate evaluation from the saved dashboard below.
-          </p>
-          <label htmlFor="reference-transcription" className="mt-5 block text-sm font-medium text-slate-200">
-            Verified reference transcription
-          </label>
-          <textarea
-            id="reference-transcription"
-            lang="hi"
-            spellCheck={false}
-            value={referenceText}
-            onChange={(event) => setReferenceText(event.target.value)}
-            placeholder="Paste the correct Devanagari transcription here..."
-            className="mt-2 h-40 w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-4 text-base leading-7 text-slate-100 outline-none focus:border-emerald-400"
-          />
-          <div className="mt-4 flex flex-wrap items-center gap-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.06] p-5 backdrop-blur-sm">
+              <p className="text-2xl font-bold text-emerald-300">01</p>
+              <p className="mt-3 font-bold text-white">Upload</p>
+              <p className="mt-1 text-sm leading-5 text-slate-400">
+                Select a manuscript image
+              </p>
+            </div>
+            <div className="mt-7 rounded-2xl border border-white/10 bg-white/[0.06] p-5 backdrop-blur-sm">
+              <p className="text-2xl font-bold text-emerald-300">02</p>
+              <p className="mt-3 font-bold text-white">Transcribe</p>
+              <p className="mt-1 text-sm leading-5 text-slate-400">
+                Extract Hindi text with OCR
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.06] p-5 backdrop-blur-sm">
+              <p className="text-2xl font-bold text-emerald-300">03</p>
+              <p className="mt-3 font-bold text-white">Translate</p>
+              <p className="mt-1 text-sm leading-5 text-slate-400">
+                Generate English text
+              </p>
+            </div>
+            <div className="mt-7 rounded-2xl border border-white/10 bg-white/[0.06] p-5 backdrop-blur-sm">
+              <p className="text-2xl font-bold text-emerald-300">04</p>
+              <p className="mt-3 font-bold text-white">Evaluate</p>
+              <p className="mt-1 text-sm leading-5 text-slate-400">
+                Compare OCR with reference text
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="workspace"
+        className="mx-auto max-w-7xl scroll-mt-6 px-5 py-10 sm:px-8 sm:py-14"
+      >
+        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">
+              Your workspace
+            </p>
+            <h2 className="mt-2 text-3xl font-extrabold tracking-tight">
+              Manuscript studio
+            </h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+              Upload an image, extract the text, refine the transcription, and
+              create an English translation.
+            </p>
+          </div>
+          <button
+            onClick={resetProject}
+            className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+          >
+            Reset workspace
+          </button>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="mb-5 flex items-start justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800"
+          >
+            <p>{error}</p>
             <button
-              type="button"
-              disabled={!referenceText.trim() || !editedText.trim() || !uploadResult}
-              onClick={() => setLiveResult({
-                ...calculateAccuracy(referenceText, editedText),
-                reference: referenceText,
-                prediction: editedText,
-              })}
-              className="rounded-lg bg-emerald-500 px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => setError("")}
+              className="font-bold"
+              aria-label="Dismiss error"
             >
-              Calculate Accuracy
+              ×
             </button>
-            {!uploadResult && <p className="text-sm text-amber-300">Extract a manuscript first to enable evaluation.</p>}
           </div>
-          {liveResult && (
-            <div className="mt-6 space-y-4" aria-live="polite">
-              {(liveResult.reference !== referenceText || liveResult.prediction !== editedText) && (
-                <p className="rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">
-                  Text has changed since this calculation. Click Calculate Accuracy to update the results.
-                </p>
-              )}
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
-                  <p className="text-sm text-slate-400">Character Error Rate (CER)</p>
-                  <p className="mt-2 text-3xl font-bold tabular-nums text-emerald-400">{liveResult.cer.toFixed(2)}%</p>
-                  <p className="mt-2 text-xs text-slate-400">{liveResult.characterErrors} edits / {liveResult.referenceCharacters} reference characters</p>
+        )}
+
+        {notice && !error && (
+          <div
+            role="status"
+            className="mb-5 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+          >
+            {notice}
+          </div>
+        )}
+
+        <div className="grid items-start gap-6 lg:grid-cols-2">
+          <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-5 py-5 sm:px-6">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 font-bold text-emerald-800">
+                  01
                 </div>
-                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
-                  <p className="text-sm text-slate-400">Word Error Rate (WER)</p>
-                  <p className="mt-2 text-3xl font-bold tabular-nums text-blue-400">{liveResult.wer.toFixed(2)}%</p>
-                  <p className="mt-2 text-xs text-slate-400">{liveResult.wordErrors} edits / {liveResult.referenceWords} reference words</p>
+                <div>
+                  <h3 className="font-bold">Manuscript image</h3>
+                  <p className="text-xs text-slate-500">
+                    JPG, PNG, WEBP · Maximum 15 MB
+                  </p>
                 </div>
-              </div>
-              <p className="text-xs leading-5 text-slate-400">
-                Whitespace is normalized before comparison. Character errors use Unicode code points;
-                word errors use whitespace-separated tokens. Error rates may exceed 100%.
-                For measuring raw OCR performance, evaluate before manually correcting the OCR text.
-              </p>
-              <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
-                <h3 className="text-lg font-semibold text-white">OCR Error Highlighting</h3>
-                <p className="mt-2 text-sm text-slate-400">
-                  Compare the evaluated OCR transcription with the verified reference.
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                  <span className="rounded-md bg-slate-800 px-3 py-1 text-slate-200">Correct</span>
-                  <span className="rounded-md bg-red-900/50 px-3 py-1 text-red-300">Substitution</span>
-                  <span className="rounded-md bg-amber-900/50 px-3 py-1 text-amber-300">Insertion</span>
-                  <span className="rounded-md bg-blue-900/50 px-3 py-1 text-blue-300">Deletion</span>
-                </div>
-                <div className="mt-5 flex flex-wrap gap-2 rounded-lg border border-slate-800 bg-slate-900 p-4 leading-8" lang="hi">
-                  {compareWords(liveResult.reference, liveResult.prediction).map((difference, index) => {
-                    const styles = {
-                      correct: "bg-slate-800 text-slate-200",
-                      substitution: "border border-red-700 bg-red-900/50 text-red-300",
-                      insertion: "border border-amber-700 bg-amber-900/50 text-amber-300",
-                      deletion: "border border-blue-700 bg-blue-900/50 text-blue-300",
-                    };
-                    const label = difference.type === "deletion"
-                      ? `Missing: ${difference.reference}`
-                      : difference.predicted;
-                    const tooltip = difference.type === "substitution"
-                      ? `Expected: ${difference.reference}`
-                      : difference.type === "insertion"
-                        ? "Extra word in OCR"
-                        : difference.type === "deletion"
-                          ? "Word missing from OCR"
-                          : "Correct word";
-                    return (
-                      <span
-                        key={index}
-                        title={tooltip}
-                        className={`rounded-md px-2 py-1 text-sm ${styles[difference.type]}`}
-                      >
-                        {label}
-                      </span>
-                    );
-                  })}
-                </div>
-                <p className="mt-3 text-xs text-slate-400">
-                  Hover over a highlighted word for details. Results reflect the last calculation.
-                </p>
               </div>
             </div>
-          )}
-        </section>
 
-        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
-          <p className="text-sm font-semibold text-emerald-400">OCR EVALUATION</p>
-          <h2 className="mt-3 text-2xl font-semibold">Accuracy Comparison Dashboard</h2>
-          <p className="mt-2 text-sm text-slate-400">
-            Results from saved reference transcriptions. Lower error rates are better.
-          </p>
-          {evaluationError && (
-            <p role="status" className="mt-5 rounded-lg border border-amber-800 bg-amber-950/30 p-4 text-sm text-amber-200">
-              Dashboard data unavailable: {evaluationError} Copy the generated CSV to
-              frontend/public/evaluation/batch_results.csv and refresh the page.
-            </p>
-          )}
-          {evaluationRows.length > 0 && (
-            <div className="mt-6 space-y-6">
-              <p className="text-sm text-slate-300">
-                Evaluated samples: <strong className="text-emerald-400">{evaluationRows.length}</strong>
-              </p>
-              <div className="grid gap-5 lg:grid-cols-2">
-                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
-                  <h3 className="mb-5 font-semibold">Character Error Rate (CER)</h3>
-                  <div className="space-y-5">
-                    <MetricBar label="Original OCR" value={average("original_cer")} color="bg-blue-500" />
-                    <MetricBar label="Enhanced OCR" value={average("enhanced_cer")} color="bg-emerald-500" />
+            <div className="p-5 sm:p-6">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) =>
+                  chooseFile(event.target.files?.[0])
+                }
+              />
+
+              {!imageUrl ? (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex min-h-64 w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 px-6 py-10 text-center transition hover:border-emerald-500 hover:bg-emerald-50/40"
+                >
+                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-100 text-2xl text-emerald-800">
+                    ↑
                   </div>
+                  <p className="mt-4 font-bold text-slate-800">
+                    Choose a manuscript image
+                  </p>
+                  <p className="mt-2 text-sm text-slate-500">
+                    Browse files on your device
+                  </p>
+                  <span className="mt-5 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white">
+                    Select image
+                  </span>
+                </button>
+              ) : (
+                <>
+                  <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
+                    <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2.5">
+                      <span className="max-w-[65%] truncate text-xs font-semibold text-slate-600">
+                        {file?.name}
+                      </span>
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        className="text-xs font-bold text-emerald-700 hover:text-emerald-900"
+                      >
+                        Change image
+                      </button>
+                    </div>
+                    <div className="flex max-h-[500px] min-h-64 items-center justify-center overflow-auto p-4">
+                      <img
+                        src={imageUrl}
+                        alt="Uploaded Hindi manuscript"
+                        className="h-auto max-w-full rounded-md object-contain shadow-sm"
+                        style={{
+                          width: `${zoom}%`,
+                          maxWidth: "none",
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-xl bg-slate-50 p-4">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <span className="font-semibold text-slate-700">
+                        Image zoom
+                      </span>
+                      <span className="font-mono text-slate-500">
+                        {zoom}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="50"
+                      max="200"
+                      step="10"
+                      value={zoom}
+                      onChange={(event) => setZoom(Number(event.target.value))}
+                      className="mt-3 w-full accent-emerald-700"
+                      aria-label="Image zoom"
+                    />
+                    <div className="mt-1 flex justify-between text-xs text-slate-400">
+                      <span>50%</span>
+                      <span>200%</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-slate-200 p-3">
+                      <p className="text-xs text-slate-500">Dimensions</p>
+                      <p className="mt-1 text-sm font-bold">
+                        {imageSize.width} × {imageSize.height}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 p-3">
+                      <p className="text-xs text-slate-500">File size</p>
+                      <p className="mt-1 text-sm font-bold">
+                        {file ? (file.size / 1024).toFixed(1) + " KB" : "—"}
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-4">
+                <input
+                  type="checkbox"
+                  checked={enhance}
+                  onChange={(event) => setEnhance(event.target.checked)}
+                  className="mt-1 h-4 w-4 accent-emerald-700"
+                />
+                <span>
+                  <span className="block text-sm font-bold">
+                    Enhance image before OCR
+                  </span>
+                  <span className="mt-1 block text-xs leading-5 text-slate-500">
+                    Apply backend image preprocessing to help improve text
+                    readability.
+                  </span>
+                </span>
+              </label>
+
+              <button
+                onClick={() => void uploadAndOCR()}
+                disabled={!file || loadingOCR}
+                className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 px-5 py-3.5 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {loadingOCR ? "Processing manuscript..." : "Extract Hindi text"}
+                {!loadingOCR && <span aria-hidden="true">→</span>}
+              </button>
+            </div>
+          </section>
+
+          <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-5 py-5 sm:px-6">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 font-bold text-blue-800">
+                  02
                 </div>
-                <div className="rounded-xl border border-slate-700 bg-slate-950 p-5">
-                  <h3 className="mb-5 font-semibold">Word Error Rate (WER)</h3>
-                  <div className="space-y-5">
-                    <MetricBar label="Original OCR" value={average("original_wer")} color="bg-blue-500" />
-                    <MetricBar label="Enhanced OCR" value={average("enhanced_wer")} color="bg-emerald-500" />
-                  </div>
+                <div>
+                  <h3 className="font-bold">Hindi transcription</h3>
+                  <p className="text-xs text-slate-500">
+                    Review and edit the extracted text
+                  </p>
                 </div>
               </div>
-              <p className="text-xs leading-5 text-slate-400">
-                Values are arithmetic averages of per-sample error rates from the saved CSV,
-                not a live score for the currently uploaded image. Bars are capped at 100% visually;
-                error rates can exceed 100%.
+            </div>
+
+            <div className="p-5 sm:p-6">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800">
+                  Devanagari · Hindi
+                </span>
+                <span className="text-xs text-slate-500">
+                  {transcription.trim()
+                    ? transcription.trim().split(/\s+/).length
+                    : 0}{" "}
+                  words
+                </span>
+              </div>
+
+              <textarea
+                value={transcription}
+                onChange={(event) => setTranscription(event.target.value)}
+                placeholder="Extracted Hindi text will appear here. You can also type or paste text manually..."
+                spellCheck={false}
+                className="min-h-[280px] w-full resize-y rounded-2xl border border-slate-200 bg-[#fbfcfe] p-4 text-base leading-8 text-slate-800 outline-none transition placeholder:text-sm placeholder:leading-6 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10"
+              />
+
+              {ocrResult && (
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div className="rounded-xl bg-slate-50 p-3">
+                    <p className="text-xs text-slate-500">Detected lines</p>
+                    <p className="mt-1 font-bold">
+                      {ocrResult.lines_detected ?? "—"}
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 p-3">
+                    <p className="text-xs text-slate-500">Image enhancement</p>
+                    <p className="mt-1 text-sm font-bold">
+                      {ocrResult.enhancement_applied ? "Applied" : "Not applied"}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={() => void copyText(transcription, "Hindi text")}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                >
+                  {copied === "Hindi text" ? "Copied!" : "Copy text"}
+                </button>
+                <button
+                  onClick={() =>
+                    downloadText(transcription, "hindi-transcription.txt")
+                  }
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                >
+                  Download TXT
+                </button>
+              </div>
+
+              <div className="my-6 border-t border-slate-100" />
+
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 font-bold text-violet-800">
+                  03
+                </div>
+                <div>
+                  <h3 className="font-bold">English translation</h3>
+                  <p className="text-xs text-slate-500">
+                    Translate your reviewed transcription
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => void translateText()}
+                disabled={!transcription.trim() || loadingTranslation}
+                className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {loadingTranslation
+                  ? "Translating..."
+                  : "Translate to English"}
+                {!loadingTranslation && <span aria-hidden="true">→</span>}
+              </button>
+
+              <textarea
+                value={translatedText}
+                onChange={(event) => setTranslatedText(event.target.value)}
+                placeholder="Your English translation will appear here..."
+                className="mt-4 min-h-40 w-full resize-y rounded-2xl border border-slate-200 bg-[#fbfcfe] p-4 text-sm leading-7 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10"
+              />
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={() => void copyText(translatedText, "English text")}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                >
+                  {copied === "English text" ? "Copied!" : "Copy translation"}
+                </button>
+                <button
+                  onClick={() =>
+                    downloadText(translatedText, "english-translation.txt")
+                  }
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                >
+                  Download TXT
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <section className="mt-8 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-700">
+                Quality check
               </p>
-              <div className="overflow-x-auto rounded-xl border border-slate-700">
-                <table className="w-full min-w-[580px] text-left text-sm">
-                  <thead className="bg-slate-800 text-slate-200">
+              <h3 className="mt-2 text-xl font-extrabold">
+                Live OCR accuracy evaluation
+              </h3>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                Paste a trusted Hindi transcription below to compare it with
+                your OCR output. The score uses word-level edit distance and is
+                an estimate, not a measure of translation quality.
+              </p>
+            </div>
+            <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600">
+              Reference comparison
+            </span>
+          </div>
+
+          <div className="mt-6 grid gap-5 lg:grid-cols-2">
+            <div>
+              <label
+                htmlFor="referenceText"
+                className="mb-2 block text-sm font-bold text-slate-700"
+              >
+                Reference Hindi text
+              </label>
+              <textarea
+                id="referenceText"
+                value={referenceText}
+                onChange={(event) => setReferenceText(event.target.value)}
+                placeholder="Paste the correct Hindi text here..."
+                className="min-h-36 w-full resize-y rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-7 outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10"
+              />
+            </div>
+
+            <div>
+              <p className="mb-2 text-sm font-bold text-slate-700">
+                Evaluation results
+              </p>
+              <div className="flex min-h-36 flex-col justify-center rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                {accuracy ? (
+                  <>
+                    <div className="flex items-end justify-between gap-3">
+                      <span className="text-sm text-slate-500">
+                        Estimated word accuracy
+                      </span>
+                      <span className="text-3xl font-black text-emerald-700">
+                        {accuracy.accuracy.toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-slate-200">
+                      <div
+                        className="h-full rounded-full bg-emerald-600 transition-all"
+                        style={{ width: `${accuracy.accuracy}%` }}
+                      />
+                    </div>
+                    <p className="mt-3 text-xs text-slate-500">
+                      Reference words: {accuracy.total} · Estimated matching
+                      words: {accuracy.correct}
+                    </p>
+                  </>
+                ) : (
+                  <div>
+                    <p className="font-semibold text-slate-700">
+                      Waiting for reference text
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-slate-500">
+                      Enter reference text and transcription to calculate a
+                      comparison score.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="evaluation"
+        className="scroll-mt-6 border-y border-slate-200 bg-white"
+      >
+        <div className="mx-auto max-w-7xl px-5 py-12 sm:px-8 sm:py-16">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">
+                Model performance
+              </p>
+              <h2 className="mt-2 text-3xl font-extrabold tracking-tight">
+                Evaluation dashboard
+              </h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                Review the saved batch evaluation data from your project when
+                the CSV file is available.
+              </p>
+            </div>
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">
+              {evaluationRows.length} saved records
+            </span>
+          </div>
+
+          {evaluationLoading ? (
+            <div className="mt-7 rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+              Loading evaluation data...
+            </div>
+          ) : evaluationError ? (
+            <div className="mt-7 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
+              <p className="font-bold text-slate-700">
+                No saved evaluation data loaded
+              </p>
+              <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-500">
+                {evaluationError} Place the evaluation CSV at{" "}
+                <code className="rounded bg-slate-200 px-1.5 py-0.5">
+                  frontend/public/evaluation/batch_results.csv
+                </code>{" "}
+                to display your saved batch results here.
+              </p>
+            </div>
+          ) : evaluationRows.length === 0 ? (
+            <div className="mt-7 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
+              The evaluation CSV contains no data records yet.
+            </div>
+          ) : (
+            <>
+              <div className="mt-7 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <MetricCard
+                  label="Evaluation records"
+                  value={String(evaluationRows.length)}
+                  detail="Rows loaded from the saved CSV"
+                />
+                <MetricCard
+                  label="Detected columns"
+                  value={String(Object.keys(evaluationRows[0]).length)}
+                  detail="Fields present in the evaluation file"
+                />
+                <MetricCard
+                  label="Average saved score"
+                  value={
+                    averageSavedAccuracy
+                      ? `${averageSavedAccuracy.value.toFixed(1)}%`
+                      : "Not available"
+                  }
+                  detail={
+                    averageSavedAccuracy
+                      ? `Calculated from ${averageSavedAccuracy.key}`
+                      : "No recognizable numeric accuracy or error-rate column"
+                  }
+                />
+              </div>
+
+              <div className="mt-7 overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="w-full min-w-[600px] border-collapse text-left text-sm">
+                  <thead className="bg-slate-50">
                     <tr>
-                      <th className="p-3">Sample</th><th className="p-3">Original CER</th>
-                      <th className="p-3">Enhanced CER</th><th className="p-3">Original WER</th>
-                      <th className="p-3">Enhanced WER</th>
+                      {Object.keys(evaluationRows[0]).map((header) => (
+                        <th
+                          key={header}
+                          className="border-b border-slate-200 px-4 py-3 font-bold text-slate-700"
+                        >
+                          {header}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {evaluationRows.map((row) => (
-                      <tr key={row.sample} className="border-t border-slate-800">
-                        <td className="p-3">{row.sample}</td>
-                        <td className="p-3">{row.original_cer.toFixed(2)}%</td>
-                        <td className="p-3">{row.enhanced_cer.toFixed(2)}%</td>
-                        <td className="p-3">{row.original_wer.toFixed(2)}%</td>
-                        <td className="p-3">{row.enhanced_wer.toFixed(2)}%</td>
+                    {evaluationRows.slice(0, 50).map((row, index) => (
+                      <tr
+                        key={index}
+                        className="transition hover:bg-emerald-50/40"
+                      >
+                        {Object.keys(evaluationRows[0]).map((header) => (
+                          <td
+                            key={header}
+                            className="max-w-xs border-b border-slate-100 px-4 py-3 text-slate-600"
+                          >
+                            <span className="block truncate">
+                              {row[header] || "—"}
+                            </span>
+                          </td>
+                        ))}
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                {evaluationRows.length > 50 && (
+                  <p className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
+                    Showing the first 50 of {evaluationRows.length} records.
+                  </p>
+                )}
               </div>
-            </div>
+            </>
           )}
-        </section>
+        </div>
+      </section>
 
-        <footer className="mt-10 border-t border-slate-800 pt-5 text-sm text-slate-500">
-          ScriptSage AI · Historical Manuscript Preservation Workspace
-        </footer>
-      </div>
+      <footer className="bg-slate-950 text-slate-400">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-5 py-7 sm:px-8">
+          <div>
+            <p className="font-bold text-white">
+              ScriptSage <span className="text-emerald-400">AI</span>
+            </p>
+            <p className="mt-1 text-xs">
+              AI-assisted manuscript transcription and translation
+            </p>
+          </div>
+          <p className="text-xs">
+            Digital heritage · Language technology · Research
+          </p>
+        </div>
+      </footer>
     </main>
   );
 }

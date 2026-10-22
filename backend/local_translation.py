@@ -12,18 +12,19 @@ MODEL_NAME = "Helsinki-NLP/opus-mt-hi-en"
 _model_lock = Lock()
 
 PROTECTED_NAMES = {
-    "\u0915\u0943\u0937\u094d\u0923": "Krishna",
-    "\u0905\u0930\u094d\u091c\u0941\u0928": "Arjun",
-    "\u0935\u0930\u0941\u0923": "Varun",
-    "\u0938\u0940\u0924\u093e": "Sita",
-    "\u0930\u093e\u092e": "Ram",
+    "कृष्ण": "Krishna",
+    "अर्जुन": "Arjun",
+    "वरुण": "Varun",
+    "सीता": "Sita",
+    "राम": "Ram",
 }
 
-# Handle common name-introduction sentences without asking the model
-# to translate the name itself.
 NAME_INTRO_PATTERN = re.compile(
     r"मेरा\s+नाम\s+(वरुण|राम|सीता|अर्जुन|कृष्ण)\s+है"
 )
+
+# Split at Hindi or English sentence-ending punctuation.
+SENTENCE_PATTERN = re.compile(r"(?<=[।!?])\s+|(?<=[.!?])\s+")
 
 
 @lru_cache(maxsize=1)
@@ -62,8 +63,10 @@ def _translate_sentence(text, tokenizer, model):
 
 
 def _translate_line(line, tokenizer, model):
-    """Translate a line while preserving known names."""
-    # Split the line around known names so the model never sees them.
+    """Translate a line sentence by sentence and preserve known names."""
+    sentences = SENTENCE_PATTERN.split(line.strip())
+    translated_sentences = []
+
     name_pattern = re.compile(
         "|".join(
             re.escape(name)
@@ -71,44 +74,41 @@ def _translate_line(line, tokenizer, model):
         )
     )
 
-    pieces = name_pattern.split(line)
-    names = name_pattern.findall(line)
+    for sentence in sentences:
+        if not sentence.strip():
+            continue
 
-    output_parts = []
+        # Handle known name-introduction sentences deterministically.
+        intro_match = NAME_INTRO_PATTERN.search(sentence)
+        if intro_match:
+            english_name = PROTECTED_NAMES[intro_match.group(1)]
+            translated_sentences.append(f"My name is {english_name}.")
+            continue
 
-    for index, piece in enumerate(pieces):
-        if piece.strip():
-            translated_piece = _translate_sentence(
-                piece, tokenizer, model
-            )
-            output_parts.append(translated_piece)
+        # Translate text around protected names separately.
+        pieces = name_pattern.split(sentence)
+        names = name_pattern.findall(sentence)
+        output_parts = []
 
-        if index < len(names):
-            output_parts.append(PROTECTED_NAMES[names[index]])
+        for index, piece in enumerate(pieces):
+            if piece.strip():
+                translated_piece = _translate_sentence(
+                    piece, tokenizer, model
+                )
+                if translated_piece:
+                    output_parts.append(translated_piece)
 
-    result = " ".join(output_parts)
+            if index < len(names):
+                output_parts.append(PROTECTED_NAMES[names[index]])
 
-    # Repair spacing before common punctuation.
-    result = re.sub(r"\s+([.,!?;:])", r"\1", result)
-    result = re.sub(r"\s+", " ", result).strip()
+        result = " ".join(output_parts)
+        result = re.sub(r"\s+([.,!?;:।])", r"\1", result)
+        result = re.sub(r"\s+", " ", result).strip()
 
-    # Exact rule for the common sentence "My name is [name]."
-    # This also handles cases where the model translates the surrounding
-    # Hindi words poorly.
-    match = NAME_INTRO_PATTERN.search(line)
-    if match:
-        english_name = PROTECTED_NAMES[match.group(1)]
-        result = re.sub(
-            r"(?i)\bmy\s+name(?:\s+is|'s)?\b[^.!?]*",
-            f"My name is {english_name}",
-            result,
-            count=1,
-        )
+        if result:
+            translated_sentences.append(result)
 
-        if not re.search(r"(?i)\bmy\s+name\b", result):
-            result = f"My name is {english_name}"
-
-    return result
+    return " ".join(translated_sentences)
 
 
 def translate_hindi_to_english(text: str) -> str:

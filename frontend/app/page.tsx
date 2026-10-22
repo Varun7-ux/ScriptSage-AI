@@ -54,6 +54,10 @@ export default function Home() {
   const [uploadError, setUploadError] = useState("");
 
   const [editedText, setEditedText] = useState("");
+  const [translatedText, setTranslatedText] = useState("");
+  const [translationSource, setTranslationSource] = useState("");
+  const [translating, setTranslating] = useState(false);
+  const [translationError, setTranslationError] = useState("");
   const [referenceText, setReferenceText] = useState("");
   const [liveResult, setLiveResult] = useState<(AccuracyResult & { reference: string; prediction: string }) | null>(null);
   const [copied, setCopied] = useState(false);
@@ -182,6 +186,8 @@ export default function Home() {
     setUploadError("");
     setEditedText("");
     setLiveResult(null);
+    setTranslatedText("");
+    setTranslationError("");
     setCopied(false);
     setZoom(100);
     setFile(null);
@@ -213,6 +219,8 @@ export default function Home() {
 
     setUploading(true);
     setLiveResult(null);
+    setTranslatedText("");
+    setTranslationError("");
     setUploadResult(null);
     setUploadError("");
     setEditedText("");
@@ -265,6 +273,41 @@ export default function Home() {
     }
   }
 
+  async function translateToEnglish() {
+    const source = editedText.trim();
+    if (!source || translating) return;
+    setTranslating(true);
+    setTranslationError("");
+    setTranslatedText("");
+    try {
+      const response = await fetch("http://127.0.0.1:8000/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: source }),
+      });
+      const data: { translated_text?: string; detail?: string } = await response.json();
+      if (!response.ok || !data.translated_text) {
+        throw new Error(data.detail || "Translation failed.");
+      }
+      setTranslatedText(data.translated_text);
+      setTranslationSource(source);
+    } catch (error) {
+      setTranslationError(error instanceof Error ? error.message : "Translation failed.");
+    } finally {
+      setTranslating(false);
+    }
+  }
+
+  function downloadTranslation() {
+    if (!translatedText) return;
+    const url = URL.createObjectURL(new Blob([translatedText], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "ScriptSage_English_Translation.txt";
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function copyTranscription() {
     if (!editedText) return;
 
@@ -311,6 +354,8 @@ export default function Home() {
 
   function removeImage() {
     setLiveResult(null);
+    setTranslatedText("");
+    setTranslationError("");
     setFile(null);
     setUploadResult(null);
     setUploadError("");
@@ -664,6 +709,31 @@ export default function Home() {
               </div>
             )}
           </div>
+        </section>
+
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
+          <p className="text-sm font-semibold text-emerald-400">AI TRANSLATION</p>
+          <h2 className="mt-3 text-2xl font-semibold">Hindi to English Translation</h2>
+          <p className="mt-2 text-sm text-slate-400">Translate the current edited Devanagari transcription. Historical language and unclear OCR may need human review.</p>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button type="button" onClick={translateToEnglish} disabled={!uploadResult || !editedText.trim() || translating}
+              className="rounded-lg bg-emerald-500 px-5 py-3 text-sm font-semibold text-slate-950 disabled:opacity-50">
+              {translating ? "Translating..." : "Translate to English"}
+            </button>
+            <button type="button" disabled={!translatedText} onClick={() => void navigator.clipboard.writeText(translatedText)}
+              className="rounded-lg border border-slate-600 px-4 py-3 text-sm disabled:opacity-50">Copy English</button>
+            <button type="button" disabled={!translatedText} onClick={downloadTranslation}
+              className="rounded-lg border border-slate-600 px-4 py-3 text-sm disabled:opacity-50">Download English TXT</button>
+          </div>
+          {translationError && <p role="alert" className="mt-4 text-sm text-rose-300">{translationError}</p>}
+          {translatedText && (
+            <div className="mt-5">
+              {translationSource !== editedText.trim() && <p className="mb-3 text-sm text-amber-300">The transcription changed. Translate again to refresh the English text.</p>}
+              <label htmlFor="english-translation" className="mb-2 block text-sm text-slate-300">English translation</label>
+              <textarea id="english-translation" lang="en" readOnly value={translatedText}
+                className="h-56 w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-4 leading-7 text-slate-100" />
+            </div>
+          )}
         </section>
 
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">

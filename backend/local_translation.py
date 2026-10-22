@@ -1,4 +1,5 @@
-"""Offline Hindi-to-English translation using Helsinki-NLP OPUS-MT."""
+
+"""Offline Hindi-to-English translation with known-name preservation."""
 
 import re
 from functools import lru_cache
@@ -10,6 +11,15 @@ from transformers import MarianMTModel, MarianTokenizer
 MODEL_NAME = "Helsinki-NLP/opus-mt-hi-en"
 _model_lock = Lock()
 
+# Keep Hindi names here as Unicode escape sequences to avoid encoding issues.
+PROTECTED_NAMES = {
+    "\u0935\u0930\u0941\u0923": "Varun",
+    "\u0930\u093e\u092e": "Ram",
+    "\u0938\u0940\u0924\u093e": "Sita",
+    "\u0905\u0930\u094d\u091c\u0941\u0928": "Arjun",
+    "\u0915\u0943\u0937\u094d\u0923": "Krishna",
+}
+
 
 @lru_cache(maxsize=1)
 def load_translation_model():
@@ -19,44 +29,76 @@ def load_translation_model():
     return tokenizer, model
 
 
-def _token_chunks(text, tokenizer, max_tokens=300):
-    """Split at Hindi/English sentence boundaries, then tokens if necessary."""
-    sentences = re.split(r"(?<=[\u0964.!?])\s+", text.strip())
-    chunks = []
-    current = ""
-    for sentence in sentences:
-        candidate = (current + " " + sentence).strip()
-        if len(tokenizer.encode(candidate, add_special_tokens=False)) <= max_tokens:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-            current = ""
-        tokens = tokenizer.encode(sentence, add_special_tokens=False)
-        if len(tokens) <= max_tokens:
-            current = sentence
-        else:
-            for start in range(0, len(tokens), max_tokens):
-                chunks.append(tokenizer.decode(tokens[start:start + max_tokens], skip_special_tokens=True))
-    if current:
-        chunks.append(current)
-    return chunks
+def _translate_sentence(text, tokenizer, model):
+    if not text.strip():
+        return text
+
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+    )
+
+    with _model_lock, torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=384,
+            num_beams=4,
+        )
+
+    return tokenizer.decode(
+        outputs[0],
+        skip_special_tokens=True,
+    ).strip()
 
 
 def translate_hindi_to_english(text: str) -> str:
+    """Translate complete lines while preserving known names."""
+    if not text or not text.strip():
+        return ""
+
     tokenizer, model = load_translation_model()
-    # Retain empty lines and manuscript line breaks.
-    lines = text.split("\n")
+
     translated_lines = []
-    for line in lines:
+
+    for line in text.split("\n"):
         if not line.strip():
             translated_lines.append("")
             continue
-        translated_chunks = []
-        for chunk in _token_chunks(line, tokenizer):
-            inputs = tokenizer(chunk, return_tensors="pt", truncation=True, max_length=512)
-            with _model_lock, torch.inference_mode():
-                outputs = model.generate(**inputs, max_new_tokens=384, num_beams=4)
-            translated_chunks.append(tokenizer.decode(outputs[0], skip_special_tokens=True).strip())
-        translated_lines.append(" ".join(translated_chunks))
+
+        # Use placeholders only for names actually present in this line.
+        replacements = {}
+        protected_line = line
+
+        for index, (hindi_name, english_name) in enumerate(
+            sorted(
+                PROTECTED_NAMES.items(),
+                key=lambda item: len(item[0]),
+                reverse=True,
+            )
+        ):
+            if hindi_name in protected_line:
+                placeholder = f"ZXQNAME{index}QXZ"
+                protected_line = protected_line.replace(
+                    hindi_name, placeholder
+                )
+                replacements[placeholder] = english_name
+
+        # Translate the whole line so sentence grammar stays together.
+        translated = _translate_sentence(
+            protected_line, tokenizer, model
+        )
+
+        # Restore known names even if placeholder capitalization changes.
+        for placeholder, english_name in replacements.items():
+            translated = re.sub(
+                re.escape(placeholder),
+                lambda _, name=english_name: name,
+                translated,
+                flags=re.IGNORECASE,
+            )
+
+        translated_lines.append(translated)
+
     return "\n".join(translated_lines).strip()

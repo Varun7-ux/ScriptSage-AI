@@ -21,7 +21,7 @@ def load_translation_model():
 
 def _token_chunks(text, tokenizer, max_tokens=300):
     """Split at Hindi/English sentence boundaries, then tokens if necessary."""
-    sentences = re.split(r"(?<=[।.!?])\s+", text.strip())
+    sentences = re.split(r"(?<=[\u0964.!?])\s+", text.strip())
     chunks = []
     current = ""
     for sentence in sentences:

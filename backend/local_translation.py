@@ -1,75 +1,82 @@
-﻿"""Hindi-to-English translation using MyMemory API."""
+﻿"""Lightweight Hindi-to-English translation for ScriptSage AI."""
 
-import os
+import logging
+import re
+
 import requests
 
-API_URL = "https://api.mymemory.translated.net/get"
+logger = logging.getLogger("scriptsage.translation")
+
+TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+
+PROTECTED_NAMES = {
+    "\u0935\u0930\u0941\u0923": "Varun",
+    "\u0930\u093e\u092e": "Ram",
+    "\u0938\u0940\u0924\u093e": "Sita",
+    "\u0905\u0930\u094d\u091c\u0941\u0928": "Arjun",
+    "\u0915\u0943\u0937\u094d\u0923": "Krishna",
+}
+
+
+def translate_chunk(text):
+    params = {
+        "client": "gtx",
+        "sl": "hi",
+        "tl": "en",
+        "dt": "t",
+        "q": text,
+    }
+
+    response = requests.get(
+        TRANSLATE_URL,
+        params=params,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        },
+        timeout=15,
+    )
+
+    response.raise_for_status()
+    data = response.json()
+
+    if not data or not data[0]:
+        raise RuntimeError("Translation service returned no text")
+
+    return "".join(
+        item[0] for item in data[0]
+        if item and item[0]
+    ).strip()
 
 
 def translate_hindi_to_english(text: str) -> str:
     if not text or not text.strip():
         return ""
 
-    translated_lines = []
+    lines = []
 
     for line in text.splitlines():
         if not line.strip():
-            translated_lines.append("")
+            lines.append("")
             continue
 
-        chunks = []
-        current = ""
+        try:
+            translated = translate_chunk(line.strip())
 
-        for word in line.split():
-            candidate = f"{current} {word}".strip()
+            for hindi_name, english_name in PROTECTED_NAMES.items():
+                if hindi_name in line:
+                    translated = re.sub(
+                        rf"\b{re.escape(english_name)}\b",
+                        english_name,
+                        translated,
+                        flags=re.IGNORECASE,
+                    )
 
-            if len(candidate.encode("utf-8")) > 400:
-                if not current:
-                    raise ValueError("Text segment is too long")
-                chunks.append(current)
-                current = word
-            else:
-                current = candidate
+            lines.append(translated)
 
-        if current:
-            chunks.append(current)
-
-        translated_chunks = []
-
-        for chunk in chunks:
-            params = {
-                "q": chunk,
-                "langpair": "hi|en",
-                "mt": "1",
-            }
-
-            email = os.getenv("MYMEMORY_EMAIL", "").strip()
-            if email:
-                params["de"] = email
-
-            response = requests.get(
-                API_URL,
-                params=params,
-                timeout=20,
+        except Exception:
+            logger.exception("Translation failed")
+            raise RuntimeError(
+                "Translation service unavailable"
             )
-            response.raise_for_status()
 
-            data = response.json()
-
-            if str(data.get("responseStatus")) != "200":
-                raise RuntimeError(
-                    str(data.get("responseDetails", "Translation API error"))
-                )
-
-            translated = data.get(
-                "responseData", {}
-            ).get("translatedText", "")
-
-            if not translated:
-                raise RuntimeError("Empty translation response")
-
-            translated_chunks.append(translated.strip())
-
-        translated_lines.append(" ".join(translated_chunks))
-
-    return "\n".join(translated_lines).strip()
+    return "\n".join(lines).strip()

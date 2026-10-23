@@ -1,9 +1,7 @@
-﻿
-from io import BytesIO
+﻿from io import BytesIO
 from threading import Lock
 import logging
 
-import torch  # Load PyTorch DLLs before PaddleOCR on Windows
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,10 +20,10 @@ logger = logging.getLogger("scriptsage")
 app = FastAPI(
     title="ScriptSage AI API",
     description="Backend API for the ScriptSage AI manuscript project.",
-    version="0.6.2",
+    version="0.6.3",
 )
 
-# Allow the local frontend and the production Vercel frontend.
+# Allow local development and deployed Vercel frontend.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

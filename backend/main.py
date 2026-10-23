@@ -18,14 +18,16 @@ from backend.preprocess import preprocess_array
 app = FastAPI(
     title="ScriptSage AI API",
     description="Backend API for the ScriptSage AI manuscript project.",
-    version="0.6.0",
+    version="0.6.1",
 )
 
+# Allow both the local frontend and the deployed Vercel frontend.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://script-sage-ai.vercel.app",
     ],
     allow_credentials=False,
     allow_methods=["*"],

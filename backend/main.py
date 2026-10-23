@@ -1,6 +1,7 @@
 ﻿
 from io import BytesIO
 from threading import Lock
+import logging
 
 import torch  # Load PyTorch DLLs before PaddleOCR on Windows
 import numpy as np
@@ -15,13 +16,16 @@ from backend.local_translation import translate_hindi_to_english
 from backend.preprocess import preprocess_array
 
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("scriptsage")
+
 app = FastAPI(
     title="ScriptSage AI API",
     description="Backend API for the ScriptSage AI manuscript project.",
-    version="0.6.1",
+    version="0.6.2",
 )
 
-# Allow both the local frontend and the deployed Vercel frontend.
+# Allow the local frontend and the production Vercel frontend.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -30,7 +34,7 @@ app.add_middleware(
         "https://script-sage-ai.vercel.app",
     ],
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -53,13 +57,7 @@ def get_ocr_model():
 
 
 def arrange_text_in_reading_order(results):
-    """
-    Group OCR text regions into lines using their positions.
-
-    Reading order:
-    1. Top to bottom
-    2. Left to right within each line
-    """
+    """Arrange detected text from top to bottom, left to right."""
     text_regions = []
 
     for result in results:
@@ -116,10 +114,7 @@ def arrange_text_in_reading_order(results):
         return "", 0
 
     text_regions.sort(
-        key=lambda region: (
-            region["center_y"],
-            region["x"],
-        )
+        key=lambda region: (region["center_y"], region["x"])
     )
 
     grouped_lines = []
@@ -129,13 +124,8 @@ def arrange_text_in_reading_order(results):
         best_distance = float("inf")
 
         for line in grouped_lines:
-            distance = abs(
-                region["center_y"] - line["center_y"]
-            )
-
-            tolerance = (
-                min(region["height"], line["height"]) * 0.5
-            )
+            distance = abs(region["center_y"] - line["center_y"])
+            tolerance = min(region["height"], line["height"]) * 0.5
 
             if distance <= tolerance and distance < best_distance:
                 best_line = line
@@ -153,35 +143,25 @@ def arrange_text_in_reading_order(results):
             best_line["regions"].append(region)
 
             centers = [
-                item["center_y"]
-                for item in best_line["regions"]
+                item["center_y"] for item in best_line["regions"]
             ]
-
             heights = [
-                item["height"]
-                for item in best_line["regions"]
+                item["height"] for item in best_line["regions"]
             ]
 
             best_line["center_y"] = sum(centers) / len(centers)
             best_line["height"] = sum(heights) / len(heights)
 
-    grouped_lines.sort(
-        key=lambda line: line["center_y"]
-    )
+    grouped_lines.sort(key=lambda line: line["center_y"])
 
     final_lines = []
 
     for line in grouped_lines:
-        line["regions"].sort(
-            key=lambda region: region["x"]
-        )
+        line["regions"].sort(key=lambda region: region["x"])
 
-        line_text = " ".join(
-            region["text"]
-            for region in line["regions"]
+        final_lines.append(
+            " ".join(region["text"] for region in line["regions"])
         )
-
-        final_lines.append(line_text)
 
     return "\n".join(final_lines), len(final_lines)
 
@@ -241,17 +221,15 @@ async def upload_manuscript(
             width, height = image.size
             image_array = np.array(image.convert("RGB"))
 
-    except (UnidentifiedImageError, OSError, ValueError):
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise HTTPException(
             status_code=400,
             detail="The uploaded file is not a valid image.",
-        )
+        ) from exc
 
     try:
         ocr_image = (
-            preprocess_array(image_array)
-            if enhance
-            else image_array
+            preprocess_array(image_array) if enhance else image_array
         )
 
         with ocr_lock:
@@ -263,11 +241,10 @@ async def upload_manuscript(
         )
 
     except Exception as exc:
-        print(f"OCR processing error: {exc}")
-
+        logger.exception("OCR processing failed")
         raise HTTPException(
             status_code=500,
-            detail="OCR processing failed. Check the backend terminal.",
+            detail="OCR processing failed. Check the backend logs.",
         ) from exc
 
     return {
@@ -289,7 +266,11 @@ class TranslationRequest(BaseModel):
 
 @app.post("/translate")
 async def translate_text(request: TranslationRequest):
-    if not request.text.strip():
+    logger.info("Received translation request")
+
+    text = request.text.strip()
+
+    if not text:
         raise HTTPException(
             status_code=400,
             detail="Enter text to translate.",
@@ -298,25 +279,35 @@ async def translate_text(request: TranslationRequest):
     try:
         translated = await run_in_threadpool(
             translate_hindi_to_english,
-            request.text,
+            text,
         )
 
-        if not translated:
-            raise RuntimeError(
-                "Local translation returned empty text."
+        if not isinstance(translated, str) or not translated.strip():
+            logger.error("Translation returned empty or invalid text")
+            raise HTTPException(
+                status_code=500,
+                detail="Translation returned no text. Check backend logs.",
             )
 
+        logger.info("Translation completed successfully")
+
         return {
-            "translated_text": translated,
+            "translated_text": translated.strip(),
         }
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
-        print(
-            f"Local translation error "
-            f"({type(exc).__name__}): {exc}"
+        logger.exception(
+            "Translation failed (%s)",
+            type(exc).__name__,
         )
 
         raise HTTPException(
             status_code=500,
-            detail="Local translation failed. Check backend logs.",
+            detail=(
+                "Translation failed. Check Render logs for the "
+                "underlying error."
+            ),
         ) from exc

@@ -1,76 +1,53 @@
-﻿"""Hindi-to-English translation for ScriptSage AI."""
+﻿"""ScriptSage AI Hindi-to-English translation."""
 
-import logging
+import os
 import requests
 
-logger = logging.getLogger("scriptsage.translation")
-
-TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
-
-
-def translate_chunk(text):
-    response = requests.get(
-        TRANSLATE_URL,
-        params={
-            "client": "gtx",
-            "sl": "hi",
-            "tl": "en",
-            "dt": "t",
-            "q": text,
-        },
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=20,
-    )
-
-    response.raise_for_status()
-    data = response.json()
-
-    if not data or not data[0]:
-        raise RuntimeError("Translation returned no text")
-
-    return "".join(
-        item[0]
-        for item in data[0]
-        if item and item[0]
-    ).strip()
+API_URL = "https://router.huggingface.co/v1/chat/completions"
 
 
 def translate_hindi_to_english(text: str) -> str:
     if not text or not text.strip():
         return ""
 
-    translated_lines = []
+    token = os.getenv("HF_TOKEN", "").strip()
 
-    for line in text.splitlines():
-        if not line.strip():
-            translated_lines.append("")
-            continue
+    if not token:
+        raise RuntimeError("HF_TOKEN is missing from Render environment")
 
-        # Group text into manageable requests.
-        words = line.split()
-        chunks = []
-        current = ""
+    response = requests.post(
+        API_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "Qwen/Qwen3-4B-Instruct-2507:fastest",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Translate the Hindi text into natural English. "
+                        "Preserve names and meaning. "
+                        "Return only the translation."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": text,
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 1200,
+        },
+        timeout=45,
+    )
 
-        for word in words:
-            candidate = f"{current} {word}".strip()
+    if not response.ok:
+        raise RuntimeError(
+            f"Hugging Face API error {response.status_code}: "
+            f"{response.text[:300]}"
+        )
 
-            if len(candidate) > 1000 and current:
-                chunks.append(current)
-                current = word
-            else:
-                current = candidate
-
-        if current:
-            chunks.append(current)
-
-        try:
-            translated_lines.append(
-                " ".join(translate_chunk(chunk) for chunk in chunks)
-            )
-        except Exception as exc:
-            logger.exception("Translation request failed")
-            raise RuntimeError(
-                "Google translation endpoint unavailable"
-            ) from exc
-
-    return "\n".join(translated_lines).strip()
+    data = response.json()
+    return data["choices"][0]["message"]["content"].strip()

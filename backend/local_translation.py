@@ -1,53 +1,74 @@
-﻿"""ScriptSage AI Hindi-to-English translation."""
+﻿"""Hindi-to-English translation using Cloudflare Workers AI."""
 
 import os
 import requests
 
-API_URL = "https://router.huggingface.co/v1/chat/completions"
+MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8-fast"
 
 
 def translate_hindi_to_english(text: str) -> str:
     if not text or not text.strip():
         return ""
 
-    token = os.getenv("HF_TOKEN", "").strip()
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+
+    if not account_id:
+        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID is missing")
 
     if not token:
-        raise RuntimeError("HF_TOKEN is missing from Render environment")
+        raise RuntimeError("CLOUDFLARE_API_TOKEN is missing")
+
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
+        f"/ai/run/{MODEL}"
+    )
 
     response = requests.post(
-        API_URL,
+        url,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
         json={
-            "model": "Qwen/Qwen3-4B-Instruct-2507:fastest",
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "Translate the Hindi text into natural English. "
-                        "Preserve names and meaning. "
-                        "Return only the translation."
+                        "You are an expert Hindi-to-English translator. "
+                        "Translate the provided Hindi text into natural English. "
+                        "Preserve the original meaning, names, and line breaks. "
+                        "Return ONLY the English translation. "
+                        "Do not add explanations or introductory text."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": text,
-                },
+                    "content": text
+                }
             ],
-            "temperature": 0,
-            "max_tokens": 1200,
+            "max_tokens": 1024,
+            "temperature": 0
         },
-        timeout=45,
+        timeout=45
     )
 
     if not response.ok:
         raise RuntimeError(
-            f"Hugging Face API error {response.status_code}: "
+            f"Cloudflare API error {response.status_code}: "
             f"{response.text[:300]}"
         )
 
     data = response.json()
-    return data["choices"][0]["message"]["content"].strip()
+
+    if not data.get("success", False):
+        raise RuntimeError(
+            f"Cloudflare AI request failed: {data.get('errors')}"
+        )
+
+    translation = data.get("result", {}).get("response", "")
+
+    if not translation:
+        raise RuntimeError("Cloudflare returned an empty translation")
+
+    return translation.strip()
